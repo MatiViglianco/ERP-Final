@@ -1,0 +1,48 @@
+from django.urls import path
+from .views import (
+    upload_csv,
+    stats,
+    list_filters,
+    list_batches,
+    sales_daily,
+    sales_manual_entry,
+    product_trend,
+    upload_bank_file,
+    bank_stats,
+    upload_account_clients,
+    list_account_clients,
+    account_client_view,
+    account_client_pay,
+    account_transaction_create,
+    account_clients_stats,
+    account_transaction_delete,
+)
+from .auth_views import (
+    CookieTokenObtainPairView,
+    CookieTokenRefreshView,
+    LogoutView,
+    CurrentUserView,
+)
+
+urlpatterns = [
+    path('upload/', upload_csv, name='upload_csv'),
+    path('stats/', stats, name='stats'),
+    path('filters/', list_filters, name='filters'),
+    path('batches/', list_batches, name='batches'),
+    path('sales/daily/', sales_daily, name='sales_daily'),
+    path('sales/manual/', sales_manual_entry, name='sales_manual_entry'),
+    path('product-trend/', product_trend, name='product_trend'),
+    path('bank/upload/', upload_bank_file, name='upload_bank_file'),
+    path('bank/stats/', bank_stats, name='bank_stats'),
+    path('accounts/upload/', upload_account_clients, name='accounts_upload'),
+    path('accounts/clients/', list_account_clients, name='accounts_clients'),
+    path('accounts/clients/stats/', account_clients_stats, name='accounts_clients_stats'),
+    path('accounts/clients/<uuid:pk>/', account_client_view, name='accounts_client_detail'),
+    path('accounts/clients/<uuid:pk>/pay/', account_client_pay, name='accounts_client_pay'),
+    path('accounts/clients/<uuid:pk>/transactions/', account_transaction_create, name='accounts_transaction_create'),
+    path('accounts/transactions/<str:external_id>/', account_transaction_delete, name='accounts_transaction_delete'),
+    path('auth/login/', CookieTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/logout/', LogoutView.as_view(), name='api_logout'),
+    path('auth/me/', CurrentUserView.as_view(), name='api_me'),
+]
