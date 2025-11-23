@@ -3,3 +3,5 @@ djangorestframework==3.15.2
 django-cors-headers==4.4.0
 xlrd==2.0.1
 djangorestframework-simplejwt==5.4.0
+dj-database-url==2.3.0
+psycopg2-binary==2.9.9

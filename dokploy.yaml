@@ -9,13 +9,12 @@ services:
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      DATABASE_URL: ${DATABASE_URL}
     ports:
       - "8000:8000"
     volumes:
-      - sqlite-data:/app/db.sqlite3
       - static-data:/app/staticfiles
     restart: unless-stopped
 
 volumes:
-  sqlite-data:
   static-data:
