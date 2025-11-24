@@ -33,6 +33,7 @@ import { useTheme } from '@mui/material/styles'
 import { Bar, Doughnut } from 'react-chartjs-2'
 import { Chart, ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 import EditIcon from '@mui/icons-material/Edit'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import InsightsIcon from '@mui/icons-material/Insights'
@@ -70,7 +71,7 @@ const donutCenterPlugin = {
 Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend, donutCenterPlugin)
 
 const paymentMethods = ['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE']
-const API_BANK_STATS = 'http://localhost:8000/api/bank/stats/'
+const API_BANK_STATS = `${API_BASE}/bank/stats/`
 const BANK_SOURCES = ['santander', 'bancon']
 const MANUAL_EXPENSES_STORAGE_KEY = 'viglianco_manual_expenses'
 const BANK_ASSIGNMENTS_STORAGE_KEY = 'viglianco_bank_assignments'

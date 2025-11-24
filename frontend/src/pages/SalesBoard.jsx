@@ -21,9 +21,10 @@ import useMediaQuery from '@mui/material/useMediaQuery'
 import { useTheme } from '@mui/material/styles'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 
-const API_SALES_DAILY = 'http://localhost:8000/api/sales/daily/'
-const API_SALES_MANUAL = 'http://localhost:8000/api/sales/manual/'
+const API_SALES_DAILY = `${API_BASE}/sales/daily/`
+const API_SALES_MANUAL = `${API_BASE}/sales/manual/`
 const YEAR_FILTER_STORAGE_KEY = 'viglianco_sales_year_filter'
 const MONTH_FILTER_STORAGE_KEY = 'viglianco_sales_month_filter'
 

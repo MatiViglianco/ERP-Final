@@ -4,6 +4,7 @@ import { Bar, Doughnut } from 'react-chartjs-2'
 import { Chart, ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 import CloseIcon from '@mui/icons-material/Close'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import DownloadIcon from '@mui/icons-material/Download'
@@ -14,8 +15,8 @@ import jsPDF from 'jspdf'
 Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const API = {
-  stats: 'http://localhost:8000/api/stats/',
-  productTrend: 'http://localhost:8000/api/product-trend/',
+  stats: `${API_BASE}/stats/`,
+  productTrend: `${API_BASE}/product-trend/`,
 }
 
 const SECTION_COLORS = {

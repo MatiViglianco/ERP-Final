@@ -39,13 +39,14 @@ import WhatsAppIcon from '@mui/icons-material/WhatsApp'
 import InsightsIcon from '@mui/icons-material/Insights'
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 
-const API_ACCOUNTS = 'http://localhost:8000/api/accounts/clients/'
-const API_ACCOUNT_DETAIL = (id) => `http://localhost:8000/api/accounts/clients/${id}/`
-const API_ACCOUNT_PAY = (id) => `http://localhost:8000/api/accounts/clients/${id}/pay/`
-const API_ACCOUNT_TX_CREATE = (id) => `http://localhost:8000/api/accounts/clients/${id}/transactions/`
-const API_ACCOUNT_TX_DELETE = (txId) => `http://localhost:8000/api/accounts/transactions/${txId}/`
-const API_ACCOUNT_STATS = 'http://localhost:8000/api/accounts/clients/stats/'
+const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
+const API_ACCOUNT_DETAIL = (id) => `${API_BASE}/accounts/clients/${id}/`
+const API_ACCOUNT_PAY = (id) => `${API_BASE}/accounts/clients/${id}/pay/`
+const API_ACCOUNT_TX_CREATE = (id) => `${API_BASE}/accounts/clients/${id}/transactions/`
+const API_ACCOUNT_TX_DELETE = (txId) => `${API_BASE}/accounts/transactions/${txId}/`
+const API_ACCOUNT_STATS = `${API_BASE}/accounts/clients/stats/`
 
 const statusFilters = [
   { value: 'all', label: 'Todos' },

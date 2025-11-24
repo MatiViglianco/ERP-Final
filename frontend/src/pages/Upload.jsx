@@ -2,10 +2,11 @@ import React, { useMemo, useState } from 'react'
 import { Container, Box, Card, CardContent, Typography, TextField, FormControlLabel, Checkbox, LinearProgress, Alert, Button, FormControl, InputLabel, Select, MenuItem, Stack } from '@mui/material'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 
-const API_UPLOAD = 'http://localhost:8000/api/upload/'
-const API_BANK_UPLOAD = 'http://localhost:8000/api/bank/upload/'
-const API_ACCOUNT_UPLOAD = 'http://localhost:8000/api/accounts/upload/'
+const API_UPLOAD = `${API_BASE}/upload/`
+const API_BANK_UPLOAD = `${API_BASE}/bank/upload/`
+const API_ACCOUNT_UPLOAD = `${API_BASE}/accounts/upload/`
 
 export default function UploadPage() {
   const today = useMemo(() => new Date().toISOString().split('T')[0], [])

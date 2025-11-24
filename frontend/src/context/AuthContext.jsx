@@ -1,6 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-
-const API_BASE = 'http://localhost:8000/api'
+import { API_BASE } from '../config'
 const ACCESS_STORAGE_KEY = 'kretz_access_token'
 const USER_STORAGE_KEY = 'kretz_user'
 const INACTIVITY_LIMIT_MS = 30 * 60 * 1000

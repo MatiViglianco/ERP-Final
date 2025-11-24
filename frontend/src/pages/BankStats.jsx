@@ -5,6 +5,7 @@ import { Chart, CategoryScale, LinearScale, BarElement, PointElement, LineElemen
 import { Bar, Line, Doughnut } from 'react-chartjs-2'
 import CloseIcon from '@mui/icons-material/Close'
 import { useAuth } from '../context/AuthContext.jsx'
+import { API_BASE } from '../config'
 const donutCenterPlugin = {
   id: 'donutCenter',
   afterDraw(chart, _args, pluginOptions) {
@@ -31,7 +32,7 @@ const donutCenterPlugin = {
 }
 Chart.register(CategoryScale, LinearScale, BarElement, PointElement, LineElement, ArcElement, Tooltip, Legend, Filler, donutCenterPlugin)
 
-const API_BANK_STATS = 'http://localhost:8000/api/bank/stats/'
+const API_BANK_STATS = `${API_BASE}/bank/stats/`
 const INCOME_COLORS = ['#50fa7b', '#38d9a9', '#4dabf7', '#ffd43b', '#845ef7', '#ff922b']
 const EXPENSE_COLORS = ['#ff6b6b', '#ff8787', '#ff9f43', '#ffa8a8', '#f783ac', '#ff4d6d']
 
