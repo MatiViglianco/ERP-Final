@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+db.sqlite3
+.venv
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/dev-server.log
+frontend/dev-server.err.log
+dist
+*.log
