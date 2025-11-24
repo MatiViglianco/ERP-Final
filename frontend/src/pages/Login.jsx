@@ -65,12 +65,14 @@ export default function LoginPage() {
     )
   }
 
+  const logoUrl = new URL('favicon.svg', import.meta.env.BASE_URL).href
+
   return (
     <Container maxWidth="md" sx={{ py: 10 }}>
       <Stack spacing={2} alignItems="center" textAlign="center" sx={{ mb: 4 }}>
         <Box
           component="img"
-          src="/favicon.svg"
+          src={logoUrl}
           alt="Viglianco ERP"
           sx={{
             width: 96,
