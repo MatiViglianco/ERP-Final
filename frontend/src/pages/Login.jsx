@@ -65,7 +65,7 @@ export default function LoginPage() {
     )
   }
 
-  const logoUrl = new URL('favicon.svg', import.meta.env.BASE_URL).href
+  const logoUrl = new URL('favicon.svg', document.baseURI).href
 
   return (
     <Container maxWidth="md" sx={{ py: 10 }}>
