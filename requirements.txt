@@ -5,3 +5,4 @@ xlrd==2.0.1
 djangorestframework-simplejwt==5.4.0
 dj-database-url==2.3.0
 psycopg2-binary==2.9.9
+gunicorn==21.2.0
