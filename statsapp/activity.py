@@ -8,7 +8,9 @@ from .models import UserActivity
 
 
 def _get_inactivity_limit():
-    value = getattr(settings, 'INACTIVITY_TIMEOUT', timedelta(minutes=30))
+    value = getattr(settings, 'INACTIVITY_TIMEOUT', None)
+    if value in (None, False, 0):
+        return None
     if isinstance(value, (int, float)):
         return timedelta(seconds=value)
     return value
@@ -27,7 +29,7 @@ def touch_user_activity(user, *, enforce_timeout=False):
     activity, _ = UserActivity.objects.get_or_create(user=user, defaults={'last_activity': now})
     limit = _get_inactivity_limit()
 
-    if enforce_timeout and activity.last_activity and now - activity.last_activity > limit:
+    if enforce_timeout and limit and activity.last_activity and now - activity.last_activity > limit:
         raise AuthenticationFailed('Sesión expirada por inactividad')
 
     if activity.last_activity != now:

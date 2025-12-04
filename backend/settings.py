@@ -103,4 +103,5 @@ JWT_REFRESH_COOKIE_NAME = 'refresh_token'
 JWT_COOKIE_SECURE = not DEBUG
 
 # Custom auth/session settings
-INACTIVITY_TIMEOUT = timedelta(minutes=30)
+# Si quieres deshabilitar el cierre por inactividad, deja este valor en None.
+INACTIVITY_TIMEOUT = None
