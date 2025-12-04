@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { API_BASE } from '../config'
 const ACCESS_STORAGE_KEY = 'kretz_access_token'
 const USER_STORAGE_KEY = 'kretz_user'
-const INACTIVITY_LIMIT_MS = 24 * 60 * 60 * 1000 // 24 horas de sesión activa
+const INACTIVITY_LIMIT_MS = null // sin cierre automático por inactividad
 const REFRESH_FLAG_KEY = 'kretz_has_refresh'
 
 const AuthContext = createContext(null)
@@ -105,16 +105,14 @@ export function AuthProvider({ children }) {
     }
   }, [setAccessToken, setUser, setRefreshFlag])
 
-  const resetInactivityTimeout = useCallback((tokenOverride) => {
-    const activeToken = typeof tokenOverride === 'string' ? tokenOverride : accessToken
-    if (!activeToken) return
+  const resetInactivityTimeout = useCallback((_tokenOverride) => {
+    // Deshabilitado el auto-logout por inactividad
     if (inactivityTimer.current) {
       clearTimeout(inactivityTimer.current)
+      inactivityTimer.current = null
     }
-    inactivityTimer.current = setTimeout(() => {
-      logout()
-    }, INACTIVITY_LIMIT_MS)
-  }, [accessToken, logout])
+    return
+  }, [])
 
   const fetchProfile = useCallback(async (token) => {
     if (!token) return null
