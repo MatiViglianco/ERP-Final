@@ -132,8 +132,8 @@ export default function LoginPage() {
             <Stack spacing={2.5} component="form" onSubmit={handleSubmit} sx={{ maxWidth: 420, mx: 'auto', py: 1 }}>
               <Typography variant="h5" fontWeight={600}>Ingresar</Typography>
               <Typography variant="body2" color="text.secondary">
-                Usá tus credenciales internas. Tras 30 minutos de inactividad se solicitará nuevamente el acceso
-                por seguridad.
+                Ingresá con tu usuario interno. La sesión se mantiene activa y sólo se cerrará si salís manualmente
+                o si pasan 24 horas sin actividad.
               </Typography>
               {error && <Alert severity="error">{error}</Alert>}
               <TextField
