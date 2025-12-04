@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { API_BASE } from '../config'
 const ACCESS_STORAGE_KEY = 'kretz_access_token'
 const USER_STORAGE_KEY = 'kretz_user'
-const INACTIVITY_LIMIT_MS = 30 * 60 * 1000
+const INACTIVITY_LIMIT_MS = 24 * 60 * 60 * 1000 // 24 horas de sesión activa
 const REFRESH_FLAG_KEY = 'kretz_has_refresh'
 
 const AuthContext = createContext(null)
@@ -15,14 +15,18 @@ const buildAuthHeader = (token, headers = {}) => {
   return next
 }
 
+const getStorage = () => (typeof window !== 'undefined' ? window.localStorage : null)
+
 const readStoredToken = () => {
-  if (typeof window === 'undefined') return null
-  return window.sessionStorage.getItem(ACCESS_STORAGE_KEY)
+  const storage = getStorage()
+  if (!storage) return null
+  return storage.getItem(ACCESS_STORAGE_KEY)
 }
 
 const readStoredUser = () => {
-  if (typeof window === 'undefined') return null
-  const raw = window.sessionStorage.getItem(USER_STORAGE_KEY)
+  const storage = getStorage()
+  if (!storage) return null
+  const raw = storage.getItem(USER_STORAGE_KEY)
   if (!raw) return null
   try {
     return JSON.parse(raw)
@@ -32,26 +36,30 @@ const readStoredUser = () => {
 }
 
 const persistToken = (token) => {
-  if (typeof window === 'undefined') return
-  if (token) window.sessionStorage.setItem(ACCESS_STORAGE_KEY, token)
-  else window.sessionStorage.removeItem(ACCESS_STORAGE_KEY)
+  const storage = getStorage()
+  if (!storage) return
+  if (token) storage.setItem(ACCESS_STORAGE_KEY, token)
+  else storage.removeItem(ACCESS_STORAGE_KEY)
 }
 
 const persistUser = (data) => {
-  if (typeof window === 'undefined') return
-  if (data) window.sessionStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data))
-  else window.sessionStorage.removeItem(USER_STORAGE_KEY)
+  const storage = getStorage()
+  if (!storage) return
+  if (data) storage.setItem(USER_STORAGE_KEY, JSON.stringify(data))
+  else storage.removeItem(USER_STORAGE_KEY)
 }
 
 const readRefreshFlag = () => {
-  if (typeof window === 'undefined') return false
-  return window.sessionStorage.getItem(REFRESH_FLAG_KEY) === '1'
+  const storage = getStorage()
+  if (!storage) return false
+  return storage.getItem(REFRESH_FLAG_KEY) === '1'
 }
 
 const persistRefreshFlag = (value) => {
-  if (typeof window === 'undefined') return
-  if (value) window.sessionStorage.setItem(REFRESH_FLAG_KEY, '1')
-  else window.sessionStorage.removeItem(REFRESH_FLAG_KEY)
+  const storage = getStorage()
+  if (!storage) return
+  if (value) storage.setItem(REFRESH_FLAG_KEY, '1')
+  else storage.removeItem(REFRESH_FLAG_KEY)
 }
 
 export function AuthProvider({ children }) {
