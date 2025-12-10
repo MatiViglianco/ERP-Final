@@ -171,7 +171,16 @@ export function AuthProvider({ children }) {
           setBootstrapping(false)
           return
         }
-        // Token inválido, limpiar y continuar con flujo normal
+        // Token invalido: intentar refrescar con la cookie antes de cerrar sesion
+        if (hasRefreshFlag) {
+          const refreshed = await refreshAccess()
+          if (!mounted) return
+          if (refreshed) {
+            setBootstrapping(false)
+            return
+          }
+        }
+        // No pudimos refrescar: limpiar estado y mostrar sesion cerrada
         setAccessToken(null)
         setUser(null)
         setRefreshFlag(false)
