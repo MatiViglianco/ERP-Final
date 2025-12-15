@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from rest_framework import status
+from rest_framework import status, serializers
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -73,6 +73,8 @@ class CookieTokenObtainPairView(TokenObtainPairView):
 
 
 class CookieTokenRefreshSerializer(TokenRefreshSerializer):
+    refresh = serializers.CharField(required=False)
+
     def validate(self, attrs):
         if not attrs.get('refresh'):
             request = self.context['request']
