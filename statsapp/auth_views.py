@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .activity import touch_user_activity
 
@@ -81,10 +82,13 @@ class CookieTokenRefreshSerializer(TokenRefreshSerializer):
             attrs['refresh'] = cookie_refresh
         data = super().validate(attrs)
         try:
-            user_id = self.refresh['user_id']
+            token = getattr(self, 'token', None) or RefreshToken(attrs['refresh'])
+            user_id = token['user_id']
             user = User.objects.get(id=user_id)
         except User.DoesNotExist as exc:
             raise AuthenticationFailed('Usuario no encontrado') from exc
+        except Exception as exc:  # Token inválido o sin user_id
+            raise AuthenticationFailed('Refresh token inválido') from exc
         touch_user_activity(user, enforce_timeout=True)
         data['user'] = _user_payload(user)
         return data
