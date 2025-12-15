@@ -9,8 +9,16 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
 # Producción por defecto; habilita DEBUG sólo si DJANGO_DEBUG=true está seteado.
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 ALLOWED_HOSTS = [host for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if host]
-CORS_ALLOWED_ORIGINS = [origin for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin]
-CSRF_TRUSTED_ORIGINS = [origin for origin in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if origin]
+_default_cors = ",".join([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://mativiglianco.github.io",
+])
+CORS_ALLOWED_ORIGINS = [origin for origin in os.environ.get("CORS_ALLOWED_ORIGINS", _default_cors).split(",") if origin]
+_default_csrf = ",".join([
+    "https://mativiglianco.github.io",
+])
+CSRF_TRUSTED_ORIGINS = [origin for origin in os.environ.get("CSRF_TRUSTED_ORIGINS", _default_csrf).split(",") if origin]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
