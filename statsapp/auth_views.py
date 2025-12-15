@@ -13,6 +13,10 @@ from .activity import touch_user_activity
 
 User = get_user_model()
 
+# Cookies cross-site: usar SameSite=None en producción para permitir envíos con credenciales.
+# En entornos de desarrollo (DEBUG=True) mantenemos Lax para no requerir HTTPS.
+REFRESH_COOKIE_SAMESITE = getattr(settings, 'JWT_REFRESH_COOKIE_SAMESITE', 'None' if not settings.DEBUG else 'Lax')
+
 
 def _user_payload(user):
     return {
@@ -31,7 +35,7 @@ def _set_refresh_cookie(response, refresh_token):
         max_age=max_age,
         httponly=True,
         secure=settings.JWT_COOKIE_SECURE,
-        samesite='Lax',
+        samesite=REFRESH_COOKIE_SAMESITE,
         path='/',
     )
 
@@ -40,6 +44,8 @@ def _clear_refresh_cookie(response):
     response.delete_cookie(
         settings.JWT_REFRESH_COOKIE_NAME,
         path='/',
+        samesite=REFRESH_COOKIE_SAMESITE,
+        secure=settings.JWT_COOKIE_SECURE,
     )
 
 
