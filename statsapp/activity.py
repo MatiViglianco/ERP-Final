@@ -8,12 +8,10 @@ from .models import UserActivity
 
 
 def _get_inactivity_limit():
-    value = getattr(settings, 'INACTIVITY_TIMEOUT', None)
-    if value in (None, False, 0):
-        return None
-    if isinstance(value, (int, float)):
-        return timedelta(seconds=value)
-    return value
+    """
+    Inactividad deshabilitada: siempre devuelve None para evitar cierre de sesión automático.
+    """
+    return None
 
 
 def touch_user_activity(user, *, enforce_timeout=False):
