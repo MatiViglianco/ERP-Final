@@ -184,22 +184,35 @@ const formatCurrency = (value) => {
   return `$ ${num.toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
 }
 
-const formatDateDisplay = (value) => {
-  if (!value) return ''
+const parseDateValue = (value) => {
+  if (!value) return null
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
+  const isoMatch = typeof value === 'string' ? value.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null
+  if (isoMatch) {
+    const [, yearStr, monthStr, dayStr] = isoMatch
+    const year = Number(yearStr)
+    const month = Number(monthStr)
+    const day = Number(dayStr)
+    return Number.isNaN(year + month + day) ? null : new Date(year, month - 1, day)
+  }
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('es-AR')
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const formatDateDisplay = (value) => {
+  const date = parseDateValue(value)
+  return date ? date.toLocaleDateString('es-AR') : ''
 }
 
 const formatDayLabel = (value) => {
-  if (!value) return ''
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('es-AR', { weekday: 'long' }).toUpperCase()
+  const date = parseDateValue(value)
+  return date ? date.toLocaleDateString('es-AR', { weekday: 'long' }).toUpperCase() : ''
 }
 
 const formatMonthYear = (value) => {
   if (!value) return ''
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
+  const date = value instanceof Date ? value : parseDateValue(value)
+  if (!date) return ''
   const formatted = date.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
   return formatted.charAt(0).toUpperCase() + formatted.slice(1)
 }
@@ -211,9 +224,8 @@ const formatMonthNumeric = (year, month) => {
 }
 
 const getMonthKeyFromDate = (value) => {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
+  const date = parseDateValue(value)
+  if (!date) return ''
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
@@ -465,8 +477,8 @@ export default function ExpensesBoard() {
     const getSortValue = (expense) => {
       if (typeof expense.sortTimestamp === 'number') return expense.sortTimestamp
       if (expense.date) {
-        const date = new Date(expense.date)
-        if (!Number.isNaN(date.getTime())) return date.getTime()
+        const date = parseDateValue(expense.date)
+        if (date) return date.getTime()
       }
       return 0
     }
@@ -777,7 +789,7 @@ export default function ExpensesBoard() {
               const conceptLabel = (conceptName || '').trim() || 'Movimiento bancario'
               const descriptionLabel = (row.description || '').trim()
               const groupingLabel = bankSource === 'bancon' && descriptionLabel ? descriptionLabel : conceptLabel
-              const dateObj = row.date ? new Date(row.date) : null
+              const dateObj = row.date ? parseDateValue(row.date) : null
               const year = dateObj ? dateObj.getFullYear() : null
               const month = dateObj ? String(dateObj.getMonth() + 1).padStart(2, '0') : null
               const monthKey = year && month ? `${year}-${month}` : 'sin-fecha'
@@ -833,8 +845,8 @@ useEffect(() => {
     setNewEntry((prev) => {
       const next = { ...prev, [field]: value }
       if (field === 'date' && value) {
-        const date = new Date(value)
-        next.day = Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('es-AR', { weekday: 'long' }).toUpperCase()
+        const date = parseDateValue(value)
+        next.day = date ? date.toLocaleDateString('es-AR', { weekday: 'long' }).toUpperCase() : ''
       }
       if (field === 'category') {
         const list = categories[value] || []
@@ -861,14 +873,10 @@ useEffect(() => {
       source: 'manual',
     }
     setExpenses((prev) => [payload, ...prev])
-    setNewEntry({
-      date: todayIso,
-      day: todayDayLabel,
+    setNewEntry((prev) => ({
+      ...prev,
       amount: '',
-      method: paymentMethods[0],
-      category: '',
-      subcategory: '',
-    })
+    }))
     setToast({ open: true, message: 'Gasto registrado', severity: 'success' })
   }
 
