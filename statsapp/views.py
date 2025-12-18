@@ -1383,8 +1383,11 @@ def account_transaction_create(request, pk):
     status_value = (data.get('status') or AccountTransaction.Status.ACTIVE).lower()
     if status_value not in AccountTransaction.Status.values:
         status_value = AccountTransaction.Status.ACTIVE
-    if status_value == AccountTransaction.Status.ACTIVE and tx_date < date.today():
-        status_value = AccountTransaction.Status.OVERDUE
+    if status_value == AccountTransaction.Status.ACTIVE:
+        today = date.today()
+        start_of_month = date(today.year, today.month, 1)
+        if tx_date < start_of_month:
+            status_value = AccountTransaction.Status.OVERDUE
 
     external_id = (data.get('external_id') or '').strip() or uuid4().hex
     if AccountTransaction.objects.filter(external_id=external_id).exists():
@@ -1420,4 +1423,3 @@ def account_transaction_delete(request, external_id):
     tx.delete()
     _recalc_account_totals([client_id])
     return Response(status=status.HTTP_204_NO_CONTENT)
-
