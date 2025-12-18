@@ -601,7 +601,11 @@ const handleWhatsappMessage = async (client) => {
 
   const openNewExpenseDialog = () => {
     if (!selectedClient) return
-    setNewExpenseForm({ date: todayISODate(), amount: '', description: '' })
+    setNewExpenseForm((prev) => ({
+      date: prev.date || todayISODate(),
+      amount: '',
+      description: prev.description || '',
+    }))
     setNewExpenseError('')
     setNewExpenseOpen(true)
   }
@@ -644,7 +648,11 @@ const handleWhatsappMessage = async (client) => {
         throw new Error(typeof detail === 'string' ? detail : 'No se pudo registrar el gasto')
       }
       setNewExpenseOpen(false)
-      setNewExpenseForm({ date: todayISODate(), amount: '', description: '' })
+      setNewExpenseForm((prev) => ({
+        ...prev,
+        amount: '',
+        description: '',
+      }))
       fetchClients()
       fetchDetail()
     } catch (err) {
