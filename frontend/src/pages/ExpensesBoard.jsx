@@ -72,9 +72,16 @@ Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Lege
 
 const paymentMethods = ['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE']
 const API_BANK_STATS = `${API_BASE}/bank/stats/`
+const API_EXPENSES = `${API_BASE}/expenses/`
+const API_EXPENSE_CATEGORIES = `${API_BASE}/expenses/categories/`
+const API_EXPENSE_ASSIGNMENTS = `${API_BASE}/expenses/assignments/`
+const API_EXPENSE_IMPORT = `${API_BASE}/expenses/import/`
 const BANK_SOURCES = ['santander', 'bancon']
 const MANUAL_EXPENSES_STORAGE_KEY = 'viglianco_manual_expenses'
 const BANK_ASSIGNMENTS_STORAGE_KEY = 'viglianco_bank_assignments'
+const CATEGORIES_STORAGE_KEY = 'viglianco_expense_categories'
+const UNCLASSIFIED_CATEGORY = 'SIN CLASIFICAR'
+const NO_DATE_MONTH_KEY = 'sin-fecha'
 
 const METHOD_ICONS = {
   'EFECTIVO': (
@@ -155,7 +162,7 @@ const CATEGORY_COLORS = {
   'VARIOS': '#CE93D8',
   'CARNES': '#FF7043',
   'BEBIDAS': '#64B5F6',
-  'SIN CLASIFICAR': '#9E9E9E',
+  [UNCLASSIFIED_CATEGORY]: '#9E9E9E',
 }
 
 const FALLBACK_CHART_COLORS = ['#29b6f6', '#ff8a65', '#4dd0e1', '#ba68c8', '#ffd54f', '#4db6ac', '#f06292', '#9575cd', '#aed581', '#90caf9']
@@ -182,6 +189,13 @@ const adjustColor = (hex, amount = 0.25) => {
 const formatCurrency = (value) => {
   const num = Number(value || 0)
   return `$ ${num.toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+}
+
+const formatLocalIsoDate = (date = new Date()) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 const parseDateValue = (value) => {
@@ -227,6 +241,16 @@ const getMonthKeyFromDate = (value) => {
   const date = parseDateValue(value)
   if (!date) return ''
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+}
+
+const isMonthKey = (value) => /^\d{4}-\d{2}$/.test(value || '')
+
+const formatMonthKeyLabel = (monthKey) => {
+  if (!monthKey) return ''
+  if (monthKey === NO_DATE_MONTH_KEY) return 'Sin fecha'
+  if (!isMonthKey(monthKey)) return monthKey
+  const [year, month] = monthKey.split('-')
+  return formatMonthNumeric(year, month)
 }
 
 const renderDeleteIcon = (backgroundColor = '#ff8a80') => (
@@ -384,38 +408,106 @@ const getMethodIcon = (method) => (
   </Box>
 )
 
-const initialExpenses = [
-  { id: 'manual-1', date: '2025-01-22', day: 'MIERCOLES', amount: 13300, method: 'EFECTIVO', category: 'VARIOS', subcategory: 'CARBON Y LENA', description: 'Gasto manual', source: 'manual' },
-  { id: 'manual-2', date: '2025-01-22', day: 'MIERCOLES', amount: 15000, method: 'EFECTIVO', category: 'SUELDOS', subcategory: 'DIEGO', description: 'Gasto manual', source: 'manual' },
-  { id: 'manual-3', date: '2025-01-23', day: 'JUEVES', amount: 13000, method: 'EFECTIVO', category: 'ALIMENTOS', subcategory: 'PANADERIA', description: 'Gasto manual', source: 'manual' },
-]
+const useBankExpenses = (authFetch) => {
+  const [bankExpenses, setBankExpenses] = useState([])
+  const [bankLoading, setBankLoading] = useState(false)
+  const [bankError, setBankError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    const fetchBankExpenses = async () => {
+      setBankLoading(true)
+      setBankError('')
+      try {
+        const results = await Promise.allSettled(
+          BANK_SOURCES.map(async (bankSource) => {
+            const response = await authFetch(`${API_BANK_STATS}?bank=${bankSource}`)
+            let data = {}
+            try {
+              data = await response.json()
+            } catch (_) {
+              data = {}
+            }
+            if (!response.ok) {
+              throw new Error(data?.detail || `No se pudieron obtener los egresos de ${bankSource}.`)
+            }
+            return { bankSource, data }
+          }),
+        )
+        const grouped = {}
+        const errors = []
+        results.forEach((result, index) => {
+          const bankSource = BANK_SOURCES[index]
+          if (result.status !== 'fulfilled') {
+            errors.push(result.reason?.message || `No se pudieron obtener los egresos de ${bankSource}.`)
+            return
+          }
+          const data = result.value.data
+          const conceptEntries = data?.concept_entries?.egresos || {}
+          Object.entries(conceptEntries).forEach(([conceptName, rows]) => {
+            rows.forEach((row) => {
+              const amount = Math.abs(Number(row.amount) || 0)
+              if (!amount) return
+              const conceptLabel = (conceptName || '').trim() || 'Movimiento bancario'
+              const descriptionLabel = (row.description || '').trim()
+              const groupingLabel = bankSource === 'bancon' && descriptionLabel ? descriptionLabel : conceptLabel
+              const dateObj = row.date ? parseDateValue(row.date) : null
+              const year = dateObj ? dateObj.getFullYear() : null
+              const month = dateObj ? String(dateObj.getMonth() + 1).padStart(2, '0') : null
+              const monthKey = year && month ? `${year}-${month}` : NO_DATE_MONTH_KEY
+              const key = `${bankSource}-${monthKey}-${groupingLabel}`
+              if (!grouped[key]) {
+                const sortTimestamp = dateObj ? new Date(dateObj.getFullYear(), dateObj.getMonth(), 1).getTime() : 0
+                const monthLabel = monthKey === NO_DATE_MONTH_KEY ? 'Sin fecha' : formatMonthNumeric(year, Number(month))
+                grouped[key] = {
+                  id: `bank-${key}`,
+                  date: monthKey === NO_DATE_MONTH_KEY ? null : `${monthKey}-01`,
+                  day: dateObj ? 'MENSUAL' : 'BANCO',
+                  displayDate: monthLabel,
+                  monthKey,
+                  amount: 0,
+                  method: 'TRANSFERENCIA',
+                  category: '',
+                  subcategory: '',
+                  description: `${groupingLabel} (${bankSource.toUpperCase()})`,
+                  source: 'bank',
+                  sortTimestamp,
+                }
+              }
+              grouped[key].amount += amount
+            })
+          })
+        })
+        if (errors.length && active) {
+          setBankError(errors.join(' '))
+        }
+        const aggregated = Object.values(grouped).sort((a, b) => (b.sortTimestamp || 0) - (a.sortTimestamp || 0))
+        if (active) setBankExpenses(aggregated)
+      } catch (err) {
+        if (active) setBankError(err.message)
+      } finally {
+        if (active) setBankLoading(false)
+      }
+    }
+    fetchBankExpenses()
+    return () => { active = false }
+  }, [authFetch])
+
+  return { bankExpenses, bankLoading, bankError }
+}
 
 export default function ExpensesBoard() {
   const { authFetch } = useAuth()
   const theme = useTheme()
   const isMobile = useMediaQuery(theme.breakpoints.down('md'))
   const ROWS_PER_PAGE = 50
-  const todayIso = useMemo(() => new Date().toISOString().split('T')[0], [])
+  const todayIso = useMemo(() => formatLocalIsoDate(), [])
   const todayDayLabel = useMemo(() => formatDayLabel(todayIso), [todayIso])
-  const [expenses, setExpenses] = useState(() => {
-    if (typeof window === 'undefined') return initialExpenses
-    try {
-      const stored = JSON.parse(window.localStorage.getItem(MANUAL_EXPENSES_STORAGE_KEY) || '[]')
-      if (Array.isArray(stored) && stored.length) return stored
-    } catch (_) {}
-    return initialExpenses
-  })
-  const [bankExpenses, setBankExpenses] = useState([])
-  const [bankLoading, setBankLoading] = useState(false)
-  const [bankError, setBankError] = useState('')
-  const [assignedCategories, setAssignedCategories] = useState(() => {
-    if (typeof window === 'undefined') return {}
-    try {
-      const stored = JSON.parse(window.localStorage.getItem(BANK_ASSIGNMENTS_STORAGE_KEY) || '{}')
-      if (stored && typeof stored === 'object') return stored
-    } catch (_) {}
-    return {}
-  })
+  const [expenses, setExpenses] = useState([])
+  const [manualLoading, setManualLoading] = useState(false)
+  const [manualError, setManualError] = useState('')
+  const { bankExpenses, bankLoading, bankError } = useBankExpenses(authFetch)
+  const [assignedCategories, setAssignedCategories] = useState({})
   const [categories, setCategories] = useState(initialCategoryMap)
   const [page, setPage] = useState(0)
   const [newEntry, setNewEntry] = useState({
@@ -444,24 +536,127 @@ export default function ExpensesBoard() {
   const categoryChartRef = useRef(null)
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(MANUAL_EXPENSES_STORAGE_KEY, JSON.stringify(expenses))
-    }
-  }, [expenses])
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(BANK_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(assignedCategories))
-    }
-  }, [assignedCategories])
-
-  useEffect(() => {
     setFilterSubcategory('')
   }, [filterCategory])
 
   useEffect(() => {
     setStatsMonthFilter('')
   }, [statsYearFilter])
+
+  useEffect(() => {
+    let active = true
+    const readStoredJson = (key, fallback) => {
+      if (typeof window === 'undefined') return fallback
+      try {
+        const raw = window.localStorage.getItem(key)
+        if (!raw) return fallback
+        const parsed = JSON.parse(raw)
+        return parsed ?? fallback
+      } catch (_) {
+        return fallback
+      }
+    }
+
+    const migrateLegacyData = async () => {
+      const legacyExpenses = readStoredJson(MANUAL_EXPENSES_STORAGE_KEY, [])
+      const legacyCategories = readStoredJson(CATEGORIES_STORAGE_KEY, {})
+      const legacyAssignments = readStoredJson(BANK_ASSIGNMENTS_STORAGE_KEY, {})
+      const hasLegacy =
+        (Array.isArray(legacyExpenses) && legacyExpenses.length) ||
+        (legacyCategories && Object.keys(legacyCategories).length) ||
+        (legacyAssignments && Object.keys(legacyAssignments).length)
+
+      if (!hasLegacy) return
+
+      const payload = {
+        expenses: Array.isArray(legacyExpenses)
+          ? legacyExpenses.map((expense) => ({
+            external_id: expense.id,
+            date: expense.date,
+            amount: Number(expense.amount || 0),
+            method: expense.method,
+            category: expense.category,
+            subcategory: expense.subcategory,
+            description: expense.description,
+          }))
+          : [],
+        categories: legacyCategories && typeof legacyCategories === 'object' ? legacyCategories : {},
+        assignments: legacyAssignments && typeof legacyAssignments === 'object' ? legacyAssignments : {},
+      }
+
+      const response = await authFetch(API_EXPENSE_IMPORT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudieron migrar los gastos guardados.')
+      }
+
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(MANUAL_EXPENSES_STORAGE_KEY)
+        window.localStorage.removeItem(CATEGORIES_STORAGE_KEY)
+        window.localStorage.removeItem(BANK_ASSIGNMENTS_STORAGE_KEY)
+      }
+    }
+
+    const loadExpensesData = async () => {
+      setManualLoading(true)
+      setManualError('')
+      try {
+        await migrateLegacyData()
+
+        const [expensesResponse, categoriesResponse, assignmentsResponse] = await Promise.all([
+          authFetch(API_EXPENSES),
+          authFetch(API_EXPENSE_CATEGORIES),
+          authFetch(API_EXPENSE_ASSIGNMENTS),
+        ])
+
+        const expensesData = await expensesResponse.json().catch(() => ([]))
+        const categoriesData = await categoriesResponse.json().catch(() => ({}))
+        const assignmentsData = await assignmentsResponse.json().catch(() => ({}))
+
+        if (!expensesResponse.ok) {
+          throw new Error(expensesData?.detail || 'No se pudieron cargar los gastos.')
+        }
+        if (!categoriesResponse.ok) {
+          throw new Error(categoriesData?.detail || 'No se pudieron cargar las categorias.')
+        }
+        if (!assignmentsResponse.ok) {
+          throw new Error(assignmentsData?.detail || 'No se pudieron cargar las asignaciones.')
+        }
+
+        let nextCategories = categoriesData?.categories || {}
+        if (!Object.keys(nextCategories).length) {
+          const seedResponse = await authFetch(API_EXPENSE_IMPORT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ categories: initialCategoryMap }),
+          })
+          if (seedResponse.ok) {
+            nextCategories = initialCategoryMap
+          }
+        }
+
+        if (!active) return
+        setExpenses(Array.isArray(expensesData) ? expensesData : [])
+        setCategories(nextCategories)
+        setAssignedCategories(assignmentsData?.assignments || {})
+      } catch (err) {
+        if (active) {
+          setManualError(err.message || 'Error al cargar los gastos.')
+        }
+      } finally {
+        if (active) {
+          setManualLoading(false)
+        }
+      }
+    }
+
+    loadExpensesData()
+    return () => { active = false }
+  }, [authFetch])
 
   useEffect(() => {
     setPage(0)
@@ -488,16 +683,20 @@ export default function ExpensesBoard() {
   const normalizedExpenses = useMemo(() => combinedExpenses.map((expense) => {
     const isBank = expense.source === 'bank'
     const assigned = assignedCategories[expense.id] || {}
-    const effectiveCategory = isBank ? assigned.category || '' : expense.category || ''
+    const effectiveCategory = isBank ? assigned.category || UNCLASSIFIED_CATEGORY : expense.category || ''
     const effectiveSubcategory = isBank ? assigned.subcategory || '' : expense.subcategory || ''
-    const monthKey = expense.monthKey || getMonthKeyFromDate(expense.date) || ''
+    const monthKey = expense.monthKey || getMonthKeyFromDate(expense.date) || (expense.date ? '' : NO_DATE_MONTH_KEY)
     return { ...expense, effectiveCategory, effectiveSubcategory, monthKey }
   }), [combinedExpenses, assignedCategories])
 
   const statsExpenses = useMemo(
     () => normalizedExpenses.filter((expense) => {
-      if (statsYearFilter && expense.monthKey && !expense.monthKey.startsWith(`${statsYearFilter}-`)) return false
-      if (statsMonthFilter && expense.monthKey !== statsMonthFilter) return false
+      if (statsMonthFilter) return expense.monthKey === statsMonthFilter
+      if (statsYearFilter) {
+        if (!expense.monthKey) return false
+        if (expense.monthKey === NO_DATE_MONTH_KEY) return false
+        if (!expense.monthKey.startsWith(`${statsYearFilter}-`)) return false
+      }
       return true
     }),
     [normalizedExpenses, statsYearFilter, statsMonthFilter],
@@ -521,12 +720,17 @@ export default function ExpensesBoard() {
     normalizedExpenses.forEach((expense) => {
       if (expense.monthKey) set.add(expense.monthKey)
     })
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
+    return Array.from(set).sort((a, b) => {
+      if (a === NO_DATE_MONTH_KEY) return 1
+      if (b === NO_DATE_MONTH_KEY) return -1
+      return a.localeCompare(b)
+    })
   }, [normalizedExpenses])
 
   const statsYearOptions = useMemo(() => {
     const set = new Set()
     availableFilterMonths.forEach((monthKey) => {
+      if (!isMonthKey(monthKey)) return
       const [year] = monthKey.split('-')
       if (year) set.add(year)
     })
@@ -535,14 +739,29 @@ export default function ExpensesBoard() {
     return values.sort((a, b) => b.localeCompare(a))
   }, [availableFilterMonths, currentYear])
 
-  const statsMonthOptions = useMemo(
-    () => [...availableFilterMonths].filter((monthKey) => !statsYearFilter || monthKey.startsWith(`${statsYearFilter}-`)).sort((a, b) => b.localeCompare(a)),
-    [availableFilterMonths, statsYearFilter],
-  )
+  useEffect(() => {
+    if (!statsYearOptions.length) return
+    if (!statsYearOptions.includes(statsYearFilter)) {
+      setStatsYearFilter(statsYearOptions[0])
+    }
+  }, [statsYearOptions, statsYearFilter])
+
+  const statsMonthOptions = useMemo(() => {
+    const months = [...availableFilterMonths].filter((monthKey) => {
+      if (monthKey === NO_DATE_MONTH_KEY) return true
+      if (!statsYearFilter) return true
+      return monthKey.startsWith(`${statsYearFilter}-`)
+    })
+    return months.sort((a, b) => {
+      if (a === NO_DATE_MONTH_KEY) return 1
+      if (b === NO_DATE_MONTH_KEY) return -1
+      return b.localeCompare(a)
+    })
+  }, [availableFilterMonths, statsYearFilter])
 
   const categorySummary = useMemo(() => {
     const summary = statsExpenses.reduce((acc, expense) => {
-      const categoryKey = expense.effectiveCategory || (expense.source === 'bank' ? 'SIN CLASIFICAR' : '')
+      const categoryKey = expense.effectiveCategory || (expense.source === 'bank' ? UNCLASSIFIED_CATEGORY : '')
       if (!categoryKey) return acc
       acc[categoryKey] = (acc[categoryKey] || 0) + Number(expense.amount || 0)
       return acc
@@ -558,7 +777,11 @@ export default function ExpensesBoard() {
       acc[expense.monthKey] = (acc[expense.monthKey] || 0) + Number(expense.amount || 0)
       return acc
     }, {})
-    return Object.entries(summary).sort((a, b) => b[0].localeCompare(a[0]))
+    return Object.entries(summary).sort(([aKey], [bKey]) => {
+      if (aKey === NO_DATE_MONTH_KEY) return 1
+      if (bKey === NO_DATE_MONTH_KEY) return -1
+      return bKey.localeCompare(aKey)
+    })
   }, [statsExpenses])
 
   const subcategorySummary = useMemo(() => {
@@ -747,8 +970,15 @@ export default function ExpensesBoard() {
     [filteredExpenses, page, ROWS_PER_PAGE],
   )
 
+  const filterCategoryOptions = useMemo(() => {
+    const base = Object.keys(categories)
+    const hasUnclassified = normalizedExpenses.some((expense) => expense.effectiveCategory === UNCLASSIFIED_CATEGORY)
+    if (!hasUnclassified || base.includes(UNCLASSIFIED_CATEGORY)) return base
+    return [...base, UNCLASSIFIED_CATEGORY]
+  }, [categories, normalizedExpenses])
+
   const filterSubcategoryOptions = useMemo(
-    () => (filterCategory ? categories[filterCategory] || [] : []),
+    () => (filterCategory && filterCategory !== UNCLASSIFIED_CATEGORY ? categories[filterCategory] || [] : []),
     [filterCategory, categories],
   )
 
@@ -771,74 +1001,15 @@ export default function ExpensesBoard() {
     setStatsSelectedCategory(clickedLabel)
   }, [baseCategoryChartData.labels, statsSelectedCategory, subcategoryDonutData])
   useEffect(() => {
-    let active = true
-    const fetchBankExpenses = async () => {
-      setBankLoading(true)
-      setBankError('')
-      try {
-        const grouped = {}
-        for (const bankSource of BANK_SOURCES) {
-          const response = await authFetch(`${API_BANK_STATS}?bank=${bankSource}`)
-          const data = await response.json()
-          if (!response.ok) throw new Error(data?.detail || `No se pudieron obtener los egresos de ${bankSource}.`)
-          const conceptEntries = data?.concept_entries?.egresos || {}
-          Object.entries(conceptEntries).forEach(([conceptName, rows]) => {
-            rows.forEach((row) => {
-              const amount = Math.abs(Number(row.amount) || 0)
-              if (!amount) return
-              const conceptLabel = (conceptName || '').trim() || 'Movimiento bancario'
-              const descriptionLabel = (row.description || '').trim()
-              const groupingLabel = bankSource === 'bancon' && descriptionLabel ? descriptionLabel : conceptLabel
-              const dateObj = row.date ? parseDateValue(row.date) : null
-              const year = dateObj ? dateObj.getFullYear() : null
-              const month = dateObj ? String(dateObj.getMonth() + 1).padStart(2, '0') : null
-              const monthKey = year && month ? `${year}-${month}` : 'sin-fecha'
-              const key = `${bankSource}-${monthKey}-${groupingLabel}`
-              if (!grouped[key]) {
-                const sortTimestamp = dateObj ? new Date(dateObj.getFullYear(), dateObj.getMonth(), 1).getTime() : 0
-                const monthKeyValue = monthKey === 'sin-fecha' ? '' : monthKey
-                const monthLabel = monthKeyValue ? formatMonthNumeric(year, Number(month)) : ''
-                grouped[key] = {
-                  id: `bank-${key}`,
-                  date: monthKey === 'sin-fecha' ? null : `${monthKey}-01`,
-                  day: dateObj ? 'MENSUAL' : 'BANCO',
-                  displayDate: monthLabel,
-                  monthKey: monthKeyValue,
-                  amount: 0,
-                  method: 'TRANSFERENCIA',
-                  category: '',
-                  subcategory: '',
-                  description: `${groupingLabel} (${bankSource.toUpperCase()})`,
-                  source: 'bank',
-                  sortTimestamp,
-                }
-              }
-              grouped[key].amount += amount
-            })
-          })
-        }
-        const aggregated = Object.values(grouped).sort((a, b) => (b.sortTimestamp || 0) - (a.sortTimestamp || 0))
-        if (active) setBankExpenses(aggregated)
-      } catch (err) {
-        if (active) setBankError(err.message)
-      } finally {
-        if (active) setBankLoading(false)
-      }
-    }
-    fetchBankExpenses()
-    return () => { active = false }
-  }, [authFetch])
-
-useEffect(() => {
-  if (!bankExpenses.length) return
-  setAssignedCategories((prev) => {
-    const next = {}
-    bankExpenses.forEach((expense) => {
-      next[expense.id] = prev[expense.id] || { category: '', subcategory: '' }
+    if (!bankExpenses.length) return
+    setAssignedCategories((prev) => {
+      const next = {}
+      bankExpenses.forEach((expense) => {
+        next[expense.id] = prev[expense.id] || { category: '', subcategory: '' }
+      })
+      return next
     })
-    return next
-  })
-}, [bankExpenses])
+  }, [bankExpenses])
 
   const handleEntryChange = (field, value) => {
     setEntryError('')
@@ -856,13 +1027,12 @@ useEffect(() => {
     })
   }
 
-  const handleAddExpense = () => {
+  const handleAddExpense = async () => {
     if (!newEntry.date || !newEntry.amount || !newEntry.category || !newEntry.subcategory) {
       setEntryError('Completa fecha, monto, categoria y subcategoria.')
       return
     }
     const payload = {
-      id: `manual-${Date.now()}`,
       date: newEntry.date,
       day: newEntry.day,
       amount: Number(newEntry.amount),
@@ -872,15 +1042,28 @@ useEffect(() => {
       description: 'Sin descripcion',
       source: 'manual',
     }
-    setExpenses((prev) => [payload, ...prev])
-    setNewEntry((prev) => ({
-      ...prev,
-      amount: '',
-    }))
-    setToast({ open: true, message: 'Gasto registrado', severity: 'success' })
+    try {
+      const response = await authFetch(API_EXPENSES, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo registrar el gasto.')
+      }
+      setExpenses((prev) => [data, ...prev])
+      setNewEntry((prev) => ({
+        ...prev,
+        amount: '',
+      }))
+      setToast({ open: true, message: 'Gasto registrado', severity: 'success' })
+    } catch (err) {
+      setToast({ open: true, message: err.message || 'No se pudo registrar el gasto.', severity: 'error' })
+    }
   }
 
-  const handleAddSubcategory = () => {
+  const handleAddSubcategory = async () => {
     if (!subcategoryCategory) {
       setSubCategoryError('Selecciona la categoria.')
       return
@@ -890,28 +1073,66 @@ useEffect(() => {
       setSubCategoryError('Ingresa el nombre de la subcategoria.')
       return
     }
-    setCategories((prev) => {
-      const current = prev[subcategoryCategory] || []
-      if (current.includes(name)) {
-        setSubCategoryError('Esa subcategoria ya existe.')
-        return prev
+    try {
+      const response = await authFetch(API_EXPENSE_CATEGORIES, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: subcategoryCategory, subcategory: name }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo crear la subcategoria.')
       }
-      return { ...prev, [subcategoryCategory]: [...current, name] }
-    })
-    setSubCategoryError('')
-    setNewSubcategory('')
-    setToast({ open: true, message: `Subcategoria ${name} creada`, severity: 'success' })
+      setCategories((prev) => {
+        const current = prev[subcategoryCategory] || []
+        if (current.includes(name)) {
+          return prev
+        }
+        return { ...prev, [subcategoryCategory]: [...current, name] }
+      })
+      setSubCategoryError('')
+      setNewSubcategory('')
+      setToast({ open: true, message: `Subcategoria ${name} creada`, severity: 'success' })
+    } catch (err) {
+      setSubCategoryError(err.message || 'No se pudo crear la subcategoria.')
+    }
   }
 
-  const handleDeleteSubcategory = (category, name) => {
-    setCategories((prev) => {
-      const updated = (prev[category] || []).filter((item) => item !== name)
-      return { ...prev, [category]: updated }
-    })
-    setExpenses((prev) => prev.map((exp) => (
-      exp.category === category && exp.subcategory === name ? { ...exp, subcategory: '' } : exp
-    )))
-    setToast({ open: true, message: `Subcategoria ${name} eliminada`, severity: 'info' })
+  const handleDeleteSubcategory = async (category, name) => {
+    try {
+      const response = await authFetch(API_EXPENSE_CATEGORIES, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category, subcategory: name }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo eliminar la subcategoria.')
+      }
+      setCategories((prev) => {
+        const updated = (prev[category] || []).filter((item) => item !== name)
+        return { ...prev, [category]: updated }
+      })
+      setExpenses((prev) => prev.map((exp) => (
+        exp.category === category && exp.subcategory === name ? { ...exp, subcategory: '' } : exp
+      )))
+      setAssignedCategories((prev) => {
+        let changed = false
+        const next = Object.entries(prev).reduce((acc, [expenseId, assignment]) => {
+          if (assignment?.category === category && assignment?.subcategory === name) {
+            changed = true
+            acc[expenseId] = { ...assignment, subcategory: '' }
+            return acc
+          }
+          acc[expenseId] = assignment
+          return acc
+        }, {})
+        return changed ? next : prev
+      })
+      setToast({ open: true, message: `Subcategoria ${name} eliminada`, severity: 'info' })
+    } catch (err) {
+      setToast({ open: true, message: err.message || 'No se pudo eliminar la subcategoria.', severity: 'error' })
+    }
   }
 
   const handleCloseToast = (_event, reason) => {
@@ -919,30 +1140,71 @@ useEffect(() => {
     setToast((prev) => ({ ...prev, open: false }))
   }
 
-  const handleBankCategoryChange = (expenseId, field, value) => {
-    setAssignedCategories((prev) => {
-      const current = prev[expenseId] || { category: '', subcategory: '' }
-      const updated = { ...current, [field]: value }
-      if (field === 'category') {
-        const list = categories[value] || []
-        updated.subcategory = list[0] || ''
+  const handleBankCategoryChange = async (expenseId, field, value) => {
+    const current = assignedCategories[expenseId] || { category: '', subcategory: '' }
+    const updated = { ...current, [field]: value }
+    if (field === 'category') {
+      const list = categories[value] || []
+      updated.subcategory = list[0] || ''
+    }
+    setAssignedCategories((prev) => ({ ...prev, [expenseId]: updated }))
+    try {
+      const response = await authFetch(API_EXPENSE_ASSIGNMENTS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assignments: [
+            { external_id: expenseId, category: updated.category, subcategory: updated.subcategory },
+          ],
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo guardar la asignacion.')
       }
-      return { ...prev, [expenseId]: updated }
-    })
+    } catch (err) {
+      setAssignedCategories((prev) => ({ ...prev, [expenseId]: current }))
+      setToast({ open: true, message: err.message || 'No se pudo guardar la asignacion.', severity: 'error' })
+    }
   }
 
-  const handleManualCategoryChange = (expenseId, field, value) => {
+  const handleManualCategoryChange = async (expenseId, field, value) => {
+    let previousExpense = null
+    let nextPayload = {}
     setExpenses((prev) => prev.map((expense) => {
       if (expense.id !== expenseId) return expense
+      previousExpense = expense
       if (field === 'category') {
         const list = categories[value] || []
-        return { ...expense, category: value, subcategory: value ? list[0] || '' : '' }
+        const nextSubcategory = value ? list[0] || '' : ''
+        nextPayload = { category: value, subcategory: nextSubcategory }
+        return { ...expense, category: value, subcategory: nextSubcategory }
       }
       if (field === 'subcategory') {
+        nextPayload = { subcategory: value }
         return { ...expense, subcategory: value }
       }
       return expense
     }))
+    if (!expenseId || !Object.keys(nextPayload).length) return
+    try {
+      const response = await authFetch(`${API_EXPENSES}${expenseId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nextPayload),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo actualizar la categoria.')
+      }
+    } catch (err) {
+      if (previousExpense) {
+        setExpenses((prev) => prev.map((expense) => (
+          expense.id === expenseId ? previousExpense : expense
+        )))
+      }
+      setToast({ open: true, message: err.message || 'No se pudo actualizar la categoria.', severity: 'error' })
+    }
   }
 
   const handleEditDescription = (expense) => {
@@ -953,20 +1215,49 @@ useEffect(() => {
     setEditDescriptionDialog({ open: false, expenseId: '', value: '' })
   }
 
-  const handleSaveDescription = () => {
+  const handleSaveDescription = async () => {
     const { expenseId, value } = editDescriptionDialog
     if (!expenseId) return
+    const nextDescription = value || 'Sin descripcion'
+    const previous = expenses.find((expense) => expense.id === expenseId)
     setExpenses((prev) => prev.map((expense) => (
-      expense.id === expenseId ? { ...expense, description: value || 'Sin descripcion' } : expense
+      expense.id === expenseId ? { ...expense, description: nextDescription } : expense
     )))
-    handleCloseDescriptionDialog()
-    setToast({ open: true, message: 'Descripcion actualizada', severity: 'success' })
+    try {
+      const response = await authFetch(`${API_EXPENSES}${expenseId}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: nextDescription }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.detail || 'No se pudo actualizar la descripcion.')
+      }
+      handleCloseDescriptionDialog()
+      setToast({ open: true, message: 'Descripcion actualizada', severity: 'success' })
+    } catch (err) {
+      if (previous) {
+        setExpenses((prev) => prev.map((expense) => (
+          expense.id === expenseId ? previous : expense
+        )))
+      }
+      setToast({ open: true, message: err.message || 'No se pudo actualizar la descripcion.', severity: 'error' })
+    }
   }
 
-  const handleDeleteExpense = (expense) => {
+  const handleDeleteExpense = async (expense) => {
     if (expense.source !== 'manual') return
-    setExpenses((prev) => prev.filter((item) => item.id !== expense.id))
-    setToast({ open: true, message: 'Gasto eliminado', severity: 'info' })
+    try {
+      const response = await authFetch(`${API_EXPENSES}${expense.id}/`, { method: 'DELETE' })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data?.detail || 'No se pudo eliminar el gasto.')
+      }
+      setExpenses((prev) => prev.filter((item) => item.id !== expense.id))
+      setToast({ open: true, message: 'Gasto eliminado', severity: 'info' })
+    } catch (err) {
+      setToast({ open: true, message: err.message || 'No se pudo eliminar el gasto.', severity: 'error' })
+    }
   }
 
   const dateFieldSx = useMemo(() => ({
@@ -1075,6 +1366,8 @@ useEffect(() => {
             <Typography variant="h6">Historial de gastos</Typography>
             <Chip label={`Total: ${formatCurrency(totals)}`} color="success" variant="outlined" />
           </Stack>
+          {manualError && <Alert severity="error" sx={{ mb: 2 }}>{manualError}</Alert>}
+          {manualLoading && <LinearProgress sx={{ mb: 2 }} />}
           {bankError && <Alert severity="error" sx={{ mb: 2 }}>{bankError}</Alert>}
           {bankLoading && <LinearProgress sx={{ mb: 2 }} />}
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ mb: 2 }}>
@@ -1088,12 +1381,12 @@ useEffect(() => {
                 <MenuItem value="">
                   <em>Todas</em>
                 </MenuItem>
-                {Object.keys(categories).map((cat) => (
+                {filterCategoryOptions.map((cat) => (
                   <MenuItem key={cat} value={cat}>{cat}</MenuItem>
                 ))}
               </Select>
             </FormControl>
-            <FormControl fullWidth size="small" disabled={!filterCategory}>
+            <FormControl fullWidth size="small" disabled={!filterCategory || filterCategory === UNCLASSIFIED_CATEGORY}>
               <InputLabel>Filtrar subcategoria</InputLabel>
               <Select
                 label="Filtrar subcategoria"
@@ -1120,7 +1413,7 @@ useEffect(() => {
                 </MenuItem>
                 {availableFilterMonths.map((monthKey) => (
                   <MenuItem key={monthKey} value={monthKey}>
-                    {formatMonthNumeric(monthKey.split('-')[0], monthKey.split('-')[1])}
+                    {formatMonthKeyLabel(monthKey)}
                   </MenuItem>
                 ))}
               </Select>
@@ -1481,10 +1774,9 @@ useEffect(() => {
                     <em>Todos los meses</em>
                   </MenuItem>
                   {statsMonthOptions.map((monthKey) => {
-                    const [year, month] = monthKey.split('-')
                     return (
                       <MenuItem key={monthKey} value={monthKey}>
-                        {formatMonthNumeric(year, month)}
+                        {formatMonthKeyLabel(monthKey)}
                       </MenuItem>
                     )
                   })}
@@ -1604,10 +1896,10 @@ useEffect(() => {
                       </TableHead>
                       <TableBody>
                         {monthlySummary.map(([monthKey, amount]) => {
-                          const [year = '', month = ''] = (monthKey || '').split('-')
+                          const label = formatMonthKeyLabel(monthKey) || 'Sin fecha'
                           return (
-                            <TableRow key={monthKey || `month-${year}-${month}`}>
-                              <TableCell>{monthKey ? formatMonthNumeric(year, month) : 'Sin fecha'}</TableCell>
+                            <TableRow key={monthKey || `month-${label}`}>
+                              <TableCell>{label}</TableCell>
                               <TableCell align="right">{formatCurrency(amount)}</TableCell>
                             </TableRow>
                           )

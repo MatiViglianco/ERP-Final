@@ -15,7 +15,19 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from .utils import parse_csv_and_aggregate, parse_csv_rows, _to_float, aggregate_rows, _parse_units, parse_santander_csv, parse_bancon_file
-from .models import UploadBatch, Record, BankUploadBatch, BankTransaction, AccountClient, AccountTransaction, SalesManualEntry
+from .models import (
+    UploadBatch,
+    Record,
+    BankUploadBatch,
+    BankTransaction,
+    AccountClient,
+    AccountTransaction,
+    SalesManualEntry,
+    ExpenseCategory,
+    ExpenseSubcategory,
+    ExpenseEntry,
+    BankExpenseAssignment,
+)
 
 SPANISH_MONTHS = [
     'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
@@ -706,6 +718,316 @@ def bank_stats(request):
             'hasta': hasta.isoformat() if hasta else bounds.get('end').isoformat() if bounds.get('end') else None,
         },
         **summary,
+    })
+
+
+def _normalize_expense_label(value):
+    return (value or '').strip().upper()
+
+
+def _serialize_expense(entry):
+    return {
+        'id': str(entry.id),
+        'external_id': entry.external_id,
+        'date': entry.date.isoformat() if entry.date else None,
+        'amount': float(entry.amount or 0),
+        'method': entry.method,
+        'category': entry.category or '',
+        'subcategory': entry.subcategory or '',
+        'description': entry.description or '',
+        'source': 'manual',
+    }
+
+
+def _serialize_expense_categories():
+    categories = ExpenseCategory.objects.prefetch_related('subcategories').order_by('name')
+    mapping = OrderedDict()
+    for category in categories:
+        subs = list(category.subcategories.order_by('name').values_list('name', flat=True))
+        mapping[category.name] = subs
+    return mapping
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def expenses(request):
+    if request.method == 'GET':
+        entries = ExpenseEntry.objects.all().order_by('-date', '-created_at')
+        return Response([_serialize_expense(entry) for entry in entries])
+
+    data = request.data or {}
+    date_value = _parse_client_date(data.get('date'))
+    if not date_value:
+        return Response({'detail': 'Fecha invalida'}, status=status.HTTP_400_BAD_REQUEST)
+
+    amount = _parse_decimal(data.get('amount'))
+    if amount <= Decimal('0'):
+        return Response({'detail': 'El monto debe ser mayor a cero'}, status=status.HTTP_400_BAD_REQUEST)
+
+    method = _normalize_expense_label(data.get('method'))
+    if method not in ExpenseEntry.Method.values:
+        method = ExpenseEntry.Method.CASH
+
+    category = _normalize_expense_label(data.get('category'))
+    subcategory = _normalize_expense_label(data.get('subcategory'))
+    description = (data.get('description') or '').strip()
+    external_id = (data.get('external_id') or '').strip() or None
+
+    if external_id:
+        entry, created = ExpenseEntry.objects.update_or_create(
+            external_id=external_id,
+            defaults={
+                'date': date_value,
+                'amount': amount,
+                'method': method,
+                'category': category,
+                'subcategory': subcategory,
+                'description': description,
+            },
+        )
+        return Response(_serialize_expense(entry), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    entry = ExpenseEntry.objects.create(
+        date=date_value,
+        amount=amount,
+        method=method,
+        category=category,
+        subcategory=subcategory,
+        description=description,
+    )
+    return Response(_serialize_expense(entry), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAdminUser])
+def expense_detail(request, pk):
+    entry = get_object_or_404(ExpenseEntry, pk=pk)
+
+    if request.method == 'DELETE':
+        entry.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data or {}
+    updated_fields = []
+    if 'date' in data:
+        date_value = _parse_client_date(data.get('date'))
+        if not date_value:
+            return Response({'detail': 'Fecha invalida'}, status=status.HTTP_400_BAD_REQUEST)
+        entry.date = date_value
+        updated_fields.append('date')
+    if 'amount' in data:
+        amount = _parse_decimal(data.get('amount'))
+        if amount <= Decimal('0'):
+            return Response({'detail': 'El monto debe ser mayor a cero'}, status=status.HTTP_400_BAD_REQUEST)
+        entry.amount = amount
+        updated_fields.append('amount')
+    if 'method' in data:
+        method = _normalize_expense_label(data.get('method'))
+        if method not in ExpenseEntry.Method.values:
+            return Response({'detail': 'Metodo invalido'}, status=status.HTTP_400_BAD_REQUEST)
+        entry.method = method
+        updated_fields.append('method')
+    if 'category' in data:
+        entry.category = _normalize_expense_label(data.get('category'))
+        updated_fields.append('category')
+    if 'subcategory' in data:
+        entry.subcategory = _normalize_expense_label(data.get('subcategory'))
+        updated_fields.append('subcategory')
+    if 'description' in data:
+        entry.description = (data.get('description') or '').strip()
+        updated_fields.append('description')
+
+    if updated_fields:
+        entry.save(update_fields=updated_fields + ['updated_at'])
+
+    return Response(_serialize_expense(entry))
+
+
+@api_view(['GET', 'POST', 'DELETE'])
+@permission_classes([IsAdminUser])
+def expense_categories(request):
+    if request.method == 'GET':
+        return Response({'categories': _serialize_expense_categories()})
+
+    data = request.data or {}
+    category = _normalize_expense_label(data.get('category'))
+    if not category:
+        return Response({'detail': 'Categoria requerida'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == 'DELETE':
+        subcategory = _normalize_expense_label(data.get('subcategory'))
+        if not subcategory:
+            return Response({'detail': 'Subcategoria requerida'}, status=status.HTTP_400_BAD_REQUEST)
+        deleted, _ = ExpenseSubcategory.objects.filter(category__name=category, name=subcategory).delete()
+        if not deleted:
+            return Response({'detail': 'Subcategoria no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+        ExpenseEntry.objects.filter(category=category, subcategory=subcategory).update(subcategory='')
+        BankExpenseAssignment.objects.filter(category=category, subcategory=subcategory).update(subcategory='')
+        return Response({'detail': 'Subcategoria eliminada'})
+
+    subcategories = data.get('subcategories')
+    created = []
+    cat_obj, _ = ExpenseCategory.objects.get_or_create(name=category)
+    if isinstance(subcategories, list):
+        for item in subcategories:
+            name = _normalize_expense_label(item)
+            if not name:
+                continue
+            _, was_created = ExpenseSubcategory.objects.get_or_create(category=cat_obj, name=name)
+            if was_created:
+                created.append(name)
+        return Response({'created': created})
+
+    subcategory = _normalize_expense_label(data.get('subcategory'))
+    if not subcategory:
+        return Response({'detail': 'Subcategoria requerida'}, status=status.HTTP_400_BAD_REQUEST)
+    _, was_created = ExpenseSubcategory.objects.get_or_create(category=cat_obj, name=subcategory)
+    return Response({'created': [subcategory] if was_created else []})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def expense_assignments(request):
+    if request.method == 'GET':
+        assignments = BankExpenseAssignment.objects.all()
+        payload = {
+            item.external_id: {
+                'category': item.category or '',
+                'subcategory': item.subcategory or '',
+            }
+            for item in assignments
+        }
+        return Response({'assignments': payload})
+
+    data = request.data or {}
+    raw_assignments = data.get('assignments') or data
+    items = []
+    if isinstance(raw_assignments, dict):
+        for ext_id, values in raw_assignments.items():
+            if isinstance(values, dict):
+                items.append({'external_id': ext_id, **values})
+    elif isinstance(raw_assignments, list):
+        items = [item for item in raw_assignments if isinstance(item, dict)]
+
+    updated = 0
+    deleted = 0
+    for item in items:
+        ext_id = (item.get('external_id') or item.get('id') or '').strip()
+        if not ext_id:
+            continue
+        category = _normalize_expense_label(item.get('category'))
+        subcategory = _normalize_expense_label(item.get('subcategory'))
+        if not category and not subcategory:
+            deleted += BankExpenseAssignment.objects.filter(external_id=ext_id).delete()[0]
+            continue
+        BankExpenseAssignment.objects.update_or_create(
+            external_id=ext_id,
+            defaults={'category': category, 'subcategory': subcategory},
+        )
+        updated += 1
+
+    return Response({'updated': updated, 'deleted': deleted})
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def expenses_import(request):
+    data = request.data or {}
+    categories = data.get('categories') or {}
+    expenses = data.get('expenses') or []
+    assignments = data.get('assignments') or {}
+
+    created_categories = 0
+    created_subcategories = 0
+    if isinstance(categories, dict):
+        for category_name, subs in categories.items():
+            category = _normalize_expense_label(category_name)
+            if not category:
+                continue
+            cat_obj, was_created = ExpenseCategory.objects.get_or_create(name=category)
+            if was_created:
+                created_categories += 1
+            if not isinstance(subs, list):
+                continue
+            for sub in subs:
+                sub_name = _normalize_expense_label(sub)
+                if not sub_name:
+                    continue
+                _, sub_created = ExpenseSubcategory.objects.get_or_create(category=cat_obj, name=sub_name)
+                if sub_created:
+                    created_subcategories += 1
+
+    created_expenses = 0
+    updated_expenses = 0
+    if isinstance(expenses, list):
+        for item in expenses:
+            if not isinstance(item, dict):
+                continue
+            date_value = _parse_client_date(item.get('date'))
+            if not date_value:
+                continue
+            amount = _parse_decimal(item.get('amount'))
+            if amount <= Decimal('0'):
+                continue
+            method = _normalize_expense_label(item.get('method'))
+            if method not in ExpenseEntry.Method.values:
+                method = ExpenseEntry.Method.CASH
+            category = _normalize_expense_label(item.get('category'))
+            subcategory = _normalize_expense_label(item.get('subcategory'))
+            description = (item.get('description') or '').strip()
+            external_id = (item.get('external_id') or item.get('id') or '').strip() or None
+
+            if external_id:
+                _, was_created = ExpenseEntry.objects.update_or_create(
+                    external_id=external_id,
+                    defaults={
+                        'date': date_value,
+                        'amount': amount,
+                        'method': method,
+                        'category': category,
+                        'subcategory': subcategory,
+                        'description': description,
+                    },
+                )
+                if was_created:
+                    created_expenses += 1
+                else:
+                    updated_expenses += 1
+            else:
+                ExpenseEntry.objects.create(
+                    date=date_value,
+                    amount=amount,
+                    method=method,
+                    category=category,
+                    subcategory=subcategory,
+                    description=description,
+                )
+                created_expenses += 1
+
+    updated_assignments = 0
+    if isinstance(assignments, dict):
+        for ext_id, values in assignments.items():
+            if not isinstance(values, dict):
+                continue
+            external_id = (ext_id or '').strip()
+            if not external_id:
+                continue
+            category = _normalize_expense_label(values.get('category'))
+            subcategory = _normalize_expense_label(values.get('subcategory'))
+            if not category and not subcategory:
+                continue
+            BankExpenseAssignment.objects.update_or_create(
+                external_id=external_id,
+                defaults={'category': category, 'subcategory': subcategory},
+            )
+            updated_assignments += 1
+
+    return Response({
+        'categories_created': created_categories,
+        'subcategories_created': created_subcategories,
+        'expenses_created': created_expenses,
+        'expenses_updated': updated_expenses,
+        'assignments_updated': updated_assignments,
     })
 
 

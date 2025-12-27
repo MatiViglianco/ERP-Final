@@ -164,6 +164,79 @@ class SalesManualEntry(models.Model):
         return f"Manual {self.batch_id} {self.date}"
 
 
+class ExpenseCategory(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class ExpenseSubcategory(models.Model):
+    category = models.ForeignKey(ExpenseCategory, on_delete=models.CASCADE, related_name='subcategories')
+    name = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('category', 'name')
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['category', 'name']),
+        ]
+
+    def __str__(self):
+        return f"{self.category.name} / {self.name}"
+
+
+class ExpenseEntry(models.Model):
+    class Method(models.TextChoices):
+        CASH = 'EFECTIVO', 'Efectivo'
+        TRANSFER = 'TRANSFERENCIA', 'Transferencia'
+        CHECK = 'CHEQUE', 'Cheque'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    external_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    method = models.CharField(max_length=32, choices=Method.choices, default=Method.CASH)
+    category = models.CharField(max_length=100, blank=True)
+    subcategory = models.CharField(max_length=100, blank=True)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+        indexes = [
+            models.Index(fields=['date']),
+            models.Index(fields=['category']),
+            models.Index(fields=['subcategory']),
+        ]
+
+    def __str__(self):
+        return f"{self.date} {self.amount} {self.category}/{self.subcategory}"
+
+
+class BankExpenseAssignment(models.Model):
+    external_id = models.CharField(max_length=128, unique=True)
+    category = models.CharField(max_length=100, blank=True)
+    subcategory = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['external_id']),
+        ]
+
+    def __str__(self):
+        return f"{self.external_id} -> {self.category}/{self.subcategory}"
+
+
 class UserActivity(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='activity')
     last_activity = models.DateTimeField(default=timezone.now)
