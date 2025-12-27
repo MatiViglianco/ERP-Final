@@ -45,11 +45,35 @@ const CARD_TITLE_SX = {
   mb: 1,
 }
 
+const CALENDAR_FIELD_SX = {
+  '& input::-webkit-calendar-picker-indicator': {
+    filter: 'invert(1)',
+    opacity: 0.9,
+    cursor: 'pointer',
+  },
+  '& input::-moz-calendar-picker-indicator': {
+    filter: 'invert(1)',
+    opacity: 0.9,
+    cursor: 'pointer',
+  },
+}
+
 const toLocalIso = (date) => {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
   const d = String(date.getDate()).padStart(2, '0')
   return `${y}-${m}-${d}`
+}
+
+function buildMonthRange(monthValue) {
+  if (!monthValue) return null
+  const [y, m] = monthValue.split('-')
+  if (!y || !m) return null
+  const lastDay = new Date(Number(y), Number(m), 0).getDate()
+  return {
+    start: `${y}-${m}-01`,
+    end: `${y}-${m}-${String(lastDay).padStart(2, '0')}`,
+  }
 }
 
 function getSectionColor(label, idx) {
@@ -141,6 +165,8 @@ export default function StatsPage() {
   const [trendOpen, setTrendOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   const exportRef = useRef(null)
+  const statsAbortRef = useRef(null)
+  const statsRequestRef = useRef(0)
 
 
   useEffect(() => {
@@ -181,13 +207,10 @@ export default function StatsPage() {
         setMonth(todayIso.slice(0, 7))
         return
       }
-      const [y, m] = month.split('-')
-      if (y && m) {
-        const lastDay = new Date(Number(y), Number(m), 0).getDate()
-        const start = `${y}-${m}-01`
-        const end = `${y}-${m}-${String(lastDay).padStart(2, '0')}`
-        if (fechaDesde !== start) setFechaDesde(start)
-        if (fechaHasta !== end) setFechaHasta(end)
+      const range = buildMonthRange(month)
+      if (range) {
+        if (fechaDesde !== range.start) setFechaDesde(range.start)
+        if (fechaHasta !== range.end) setFechaHasta(range.end)
       }
       return
     }
@@ -202,7 +225,8 @@ export default function StatsPage() {
       return { start: startOfYearIso, end: endOfYearIso }
     }
     if (rangeMode === 'month' && month) {
-      return { start: fechaDesde, end: fechaHasta }
+      const range = buildMonthRange(month)
+      if (range) return range
     }
     if (!fechaDesde) return {}
     if (variosDias && fechaHasta) {
@@ -211,6 +235,13 @@ export default function StatsPage() {
     return { start: fechaDesde, end: fechaDesde }
   }, [rangeMode, month, fechaDesde, fechaHasta, variosDias, startOfYearIso, endOfYearIso])
   const fetchStats = useCallback(async () => {
+    const requestId = statsRequestRef.current + 1
+    statsRequestRef.current = requestId
+    if (statsAbortRef.current) {
+      statsAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    statsAbortRef.current = controller
     setLoading(true); setError('')
     const search = new URLSearchParams()
     const range = buildRangeParams()
@@ -222,20 +253,28 @@ export default function StatsPage() {
     if (range.end) search.set('fecha_hasta', range.end)
     if (fSeccion) search.set('seccion', fSeccion)
     try {
-      const resp = await authFetch(`${API.stats}?${search.toString()}`)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'Error de servidor')
+      const resp = await authFetch(`${API.stats}?${search.toString()}`, { signal: controller.signal })
+      const data = await resp.json().catch(() => ({}))
+      if (statsRequestRef.current !== requestId) return
+      if (!resp.ok) throw new Error(data?.detail || 'Error de servidor')
       setResult(data)
       setSelectedProduct('')
       setProductTrend(null)
       setTrendError('')
       setTrendOpen(false)
     } catch (err) {
+      if (err?.name === 'AbortError') return
+      if (statsRequestRef.current !== requestId) return
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (statsRequestRef.current === requestId) {
+        setLoading(false)
+      }
+      if (statsAbortRef.current === controller) {
+        statsAbortRef.current = null
+      }
     }
-  }, [batchId, buildRangeParams, fSeccion, authFetch])
+  }, [batchId, buildRangeParams, fSeccion, authFetch, rangeMode, variosDias, month])
 
   useEffect(() => {
     fetchStats()
@@ -359,7 +398,7 @@ export default function StatsPage() {
     } finally {
       setTrendLoading(false)
     }
-  }, [batchId, fSeccion, buildRangeParams, authFetch])
+  }, [batchId, fSeccion, buildRangeParams, authFetch, rangeMode, variosDias, month])
   const closeTrend = useCallback(() => {
     setTrendOpen(false)
     setProductTrend(null)
@@ -541,18 +580,42 @@ export default function StatsPage() {
 
             {rangeMode === 'month' && (
               <Box>
-                <TextField type="month" fullWidth label="Mes" InputLabelProps={{ shrink: true }} value={month || todayIso.slice(0, 7)} onChange={(e) => setMonth(e.target.value)} />
+                <TextField
+                  type="month"
+                  fullWidth
+                  label="Mes"
+                  InputLabelProps={{ shrink: true }}
+                  value={month || todayIso.slice(0, 7)}
+                  onChange={(e) => setMonth(e.target.value)}
+                  sx={CALENDAR_FIELD_SX}
+                />
               </Box>
             )}
 
             {rangeMode === 'day' && (
               <>
                 <Box>
-                  <TextField type="date" fullWidth label="Desde" InputLabelProps={{ shrink: true }} value={fechaDesde} onChange={(e) => setFechaDesde(e.target.value)} />
+                  <TextField
+                    type="date"
+                    fullWidth
+                    label="Desde"
+                    InputLabelProps={{ shrink: true }}
+                    value={fechaDesde}
+                    onChange={(e) => setFechaDesde(e.target.value)}
+                    sx={CALENDAR_FIELD_SX}
+                  />
                 </Box>
                 {variosDias && (
                   <Box>
-                    <TextField type="date" fullWidth label="Hasta" InputLabelProps={{ shrink: true }} value={fechaHasta} onChange={(e) => setFechaHasta(e.target.value)} />
+                    <TextField
+                      type="date"
+                      fullWidth
+                      label="Hasta"
+                      InputLabelProps={{ shrink: true }}
+                      value={fechaHasta}
+                      onChange={(e) => setFechaHasta(e.target.value)}
+                      sx={CALENDAR_FIELD_SX}
+                    />
                   </Box>
                 )}
                 <Box>
