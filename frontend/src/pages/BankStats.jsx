@@ -77,13 +77,13 @@ function formatDateHeading(dateStr) {
 export default function BankStatsPage() {
   const today = useMemo(() => new Date(), [])
   const currentYear = useMemo(() => today.getFullYear(), [today])
-  const startOfYear = useMemo(() => new Date(currentYear, 0, 1), [currentYear])
-  const startOfYearIso = useMemo(() => toIso(startOfYear), [startOfYear])
   const todayIso = useMemo(() => toIso(today), [today])
 
   const [bank, setBank] = useState('santander')
   const [monthPreset, setMonthPreset] = useState('year')
-  const [fechaDesde, setFechaDesde] = useState(startOfYearIso)
+  const [availableYears, setAvailableYears] = useState([])
+  const [selectedYear, setSelectedYear] = useState(currentYear.toString())
+  const [fechaDesde, setFechaDesde] = useState(() => toIso(new Date(currentYear, 0, 1)))
   const [fechaHasta, setFechaHasta] = useState(todayIso)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -141,25 +141,43 @@ export default function BankStatsPage() {
       color: '#fff'
     }
   }), [])
+  const yearOptions = useMemo(() => (
+    availableYears.length ? availableYears : [currentYear.toString()]
+  ), [availableYears, currentYear])
+  const normalizedYear = useMemo(() => (
+    yearOptions.includes(selectedYear) ? selectedYear : yearOptions[yearOptions.length - 1]
+  ), [yearOptions, selectedYear])
+  const selectedYearNumber = useMemo(() => {
+    const parsed = Number(normalizedYear)
+    return Number.isFinite(parsed) ? parsed : currentYear
+  }, [normalizedYear, currentYear])
+  const startOfSelectedYearIso = useMemo(
+    () => toIso(new Date(selectedYearNumber, 0, 1)),
+    [selectedYearNumber],
+  )
+  const endOfSelectedYearIso = useMemo(() => {
+    if (selectedYearNumber === currentYear) return todayIso
+    return toIso(new Date(selectedYearNumber, 11, 31))
+  }, [selectedYearNumber, currentYear, todayIso])
   const isCustomRange = monthPreset === 'custom'
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailConcept, setDetailConcept] = useState('')
   const [detailMode, setDetailMode] = useState('ingresos')
   const [detailItems, setDetailItems] = useState([])
   const { authFetch } = useAuth()
-  const recentMonths = useMemo(() => {
+  const monthOptions = useMemo(() => {
     const months = []
-    for (let monthIndex = 11; monthIndex >= 0; monthIndex -= 1) {
-      const date = new Date(currentYear, monthIndex, 1)
-      const value = `${currentYear}-${String(monthIndex + 1).padStart(2, '0')}`
-      const rawLabel = date.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+    for (let monthIndex = 0; monthIndex < 12; monthIndex += 1) {
+      const date = new Date(selectedYearNumber, monthIndex, 1)
+      const value = `${selectedYearNumber}-${String(monthIndex + 1).padStart(2, '0')}`
+      const rawLabel = date.toLocaleDateString('es-AR', { month: 'long' })
       months.push({
         value,
         label: rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1)
       })
     }
     return months
-  }, [currentYear])
+  }, [selectedYearNumber])
   const detailGroups = useMemo(() => {
     if (!detailItems.length) return []
     const groups = new Map()
@@ -177,6 +195,22 @@ export default function BankStatsPage() {
     return Array.from(groups.values())
   }, [detailItems])
 
+  useEffect(() => {
+    if (normalizedYear !== selectedYear) {
+      setSelectedYear(normalizedYear)
+    }
+  }, [normalizedYear, selectedYear])
+
+  useEffect(() => {
+    if (monthPreset === 'custom' || monthPreset === 'year') return
+    const match = monthPreset.match(/^\d{4}-(\d{2})$/)
+    if (!match) return
+    const nextPreset = `${selectedYearNumber}-${match[1]}`
+    if (nextPreset !== monthPreset) {
+      setMonthPreset(nextPreset)
+    }
+  }, [monthPreset, selectedYearNumber])
+
   const fetchStats = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -189,6 +223,10 @@ export default function BankStatsPage() {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudieron obtener los datos')
       setStats(data)
+      const availableYearStrings = (data?.filters?.available_years || [])
+        .map((year) => (year != null ? year.toString() : ''))
+        .filter(Boolean)
+      setAvailableYears(availableYearStrings)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -202,8 +240,8 @@ export default function BankStatsPage() {
 
   useEffect(() => {
     if (monthPreset === 'year') {
-      setFechaDesde((prev) => (prev === startOfYearIso ? prev : startOfYearIso))
-      setFechaHasta((prev) => (prev === todayIso ? prev : todayIso))
+      setFechaDesde((prev) => (prev === startOfSelectedYearIso ? prev : startOfSelectedYearIso))
+      setFechaHasta((prev) => (prev === endOfSelectedYearIso ? prev : endOfSelectedYearIso))
       return
     }
     if (monthPreset !== 'custom') {
@@ -212,7 +250,7 @@ export default function BankStatsPage() {
       setFechaDesde((prev) => (prev === start ? prev : start))
       setFechaHasta((prev) => (prev === end ? prev : end))
     }
-  }, [monthPreset, startOfYearIso, todayIso])
+  }, [monthPreset, startOfSelectedYearIso, endOfSelectedYearIso])
 
   const buildBarData = (dataset, label, color) => {
     if (!dataset?.length) return null
@@ -380,16 +418,30 @@ export default function BankStatsPage() {
                   </Select>
                 </FormControl>
                 <FormControl fullWidth>
-                  <InputLabel id="period-select" sx={{ color: '#fff', '&.Mui-focused': { color: '#fff' } }}>Período</InputLabel>
+                  <InputLabel id="year-select" sx={{ color: '#fff', '&.Mui-focused': { color: '#fff' } }}>A\u00f1o</InputLabel>
+                  <Select
+                    labelId="year-select"
+                    label="A\u00f1o"
+                    value={normalizedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    sx={outlinedSelectSx}
+                  >
+                    {yearOptions.map((year) => (
+                      <MenuItem key={year} value={year}>{year}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl fullWidth>
+                  <InputLabel id="period-select" sx={{ color: '#fff', '&.Mui-focused': { color: '#fff' } }}>Periodo</InputLabel>
                   <Select
                     labelId="period-select"
-                    label="Período"
+                    label="Periodo"
                     value={monthPreset}
                     onChange={(e) => setMonthPreset(e.target.value)}
                     sx={outlinedSelectSx}
                   >
-                    <MenuItem value="year">General (año actual)</MenuItem>
-                    {recentMonths.map((month) => (
+                    <MenuItem value="year">{`General del a\u00f1o ${normalizedYear}`}</MenuItem>
+                    {monthOptions.map((month) => (
                       <MenuItem key={month.value} value={month.value}>{month.label}</MenuItem>
                     ))}
                     <MenuItem value="custom">Rango personalizado</MenuItem>

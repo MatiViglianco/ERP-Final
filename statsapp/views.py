@@ -615,6 +615,18 @@ def bank_stats(request):
     selected_bank = (request.GET.get('bank') or '').strip().lower() or 'santander'
     desde = _parse_query_date(request.GET.get('fecha_desde'))
     hasta = _parse_query_date(request.GET.get('fecha_hasta'))
+    year_qs = base_qs
+    if selected_bank in {'santander', 'bancon'}:
+        year_qs = year_qs.filter(batch__bank=selected_bank)
+    available_years = sorted([
+        year for year in (
+            year_qs.exclude(date__isnull=True)
+            .annotate(year=ExtractYear('date'))
+            .values_list('year', flat=True)
+            .distinct()
+        )
+        if year
+    ])
 
     def apply_filters(queryset, bank_override=None):
         query = queryset
@@ -716,6 +728,7 @@ def bank_stats(request):
             'bank': selected_bank,
             'desde': desde.isoformat() if desde else bounds.get('start').isoformat() if bounds.get('start') else None,
             'hasta': hasta.isoformat() if hasta else bounds.get('end').isoformat() if bounds.get('end') else None,
+            'available_years': available_years,
         },
         **summary,
     })
