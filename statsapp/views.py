@@ -544,9 +544,6 @@ def upload_bank_file(request):
     if not uploaded:
         return Response({'detail': 'Falta el archivo a subir'}, status=status.HTTP_400_BAD_REQUEST)
 
-    truthy = {'1', 'true', 'on', 'yes', 'si', 's'}
-    overwrite = (request.POST.get('overwrite') or '').strip().lower() in truthy
-
     parser = parse_santander_csv if bank == 'santander' else parse_bancon_file
     try:
         rows = parser(uploaded)
@@ -558,27 +555,61 @@ def upload_bank_file(request):
         return Response({'detail': 'No se detectaron fechas validas en el archivo'}, status=status.HTTP_400_BAD_REQUEST)
     fecha_desde, fecha_hasta = dates[0], dates[-1]
 
-    conflict_q = BankUploadBatch.objects.filter(bank=bank).filter(
-        Q(fecha_desde__lte=fecha_hasta, fecha_hasta__gte=fecha_desde)
-    )
-    if conflict_q.exists() and not overwrite:
-        return Response(
-            {
-                'detail': 'Ya existen movimientos cargados para ese periodo. Desea sobrescribirlos?',
-                'requires_overwrite': True,
-                'conflicts': [{'id': b.id, 'desde': b.fecha_desde.isoformat(), 'hasta': b.fecha_hasta.isoformat()} for b in conflict_q],
-            },
-            status=status.HTTP_409_CONFLICT,
+    def _normalize_text(value):
+        return ' '.join((value or '').strip().lower().split())
+
+    def _tx_key(date_value, concept_value, description_value, amount_value):
+        return (
+            date_value,
+            _normalize_text(concept_value),
+            _normalize_text(description_value),
+            round(float(amount_value or 0.0), 2),
         )
 
-    if overwrite:
-        conflict_q.delete()
+    existing_counts = defaultdict(int)
+    existing_qs = BankTransaction.objects.filter(
+        batch__bank=bank,
+        date__gte=fecha_desde,
+        date__lte=fecha_hasta,
+    ).values_list('date', 'concept', 'description', 'amount')
+    for date_value, concept_value, description_value, amount_value in existing_qs:
+        existing_counts[_tx_key(date_value, concept_value, description_value, amount_value)] += 1
+
+    unique_rows = []
+    duplicate_count = 0
+    for row in rows:
+        key = _tx_key(row.get('date'), row.get('concept'), row.get('description'), row.get('amount'))
+        if existing_counts.get(key, 0) > 0:
+            existing_counts[key] -= 1
+            duplicate_count += 1
+            continue
+        unique_rows.append(row)
+
+    if not unique_rows:
+        return Response({
+            'batch_id': None,
+            'summary': {
+                'ingresos': 0.0,
+                'egresos': 0.0,
+                'neto': 0.0,
+                'desde': fecha_desde.isoformat(),
+                'hasta': fecha_hasta.isoformat(),
+                'movimientos': 0,
+                'movimientos_total': len(rows),
+                'duplicados': duplicate_count,
+            },
+            'detail': 'No se encontraron movimientos nuevos. Se conservaron los existentes.',
+        })
+
+    unique_dates = sorted([row['date'] for row in unique_rows if row.get('date')])
+    fecha_desde_new = unique_dates[0] if unique_dates else fecha_desde
+    fecha_hasta_new = unique_dates[-1] if unique_dates else fecha_hasta
 
     batch = BankUploadBatch.objects.create(
         bank=bank,
         original_filename=getattr(uploaded, 'name', ''),
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta,
+        fecha_desde=fecha_desde_new,
+        fecha_hasta=fecha_hasta_new,
     )
 
     txs = [
@@ -589,21 +620,23 @@ def upload_bank_file(request):
             description=row.get('description') or '',
             amount=row.get('amount') or 0.0,
         )
-        for row in rows
+        for row in unique_rows
     ]
     BankTransaction.objects.bulk_create(txs, batch_size=1000)
 
-    ingresos = sum(row['amount'] for row in rows if row['amount'] > 0)
-    egresos = sum(row['amount'] for row in rows if row['amount'] < 0)
+    ingresos = sum(row['amount'] for row in unique_rows if row['amount'] > 0)
+    egresos = sum(row['amount'] for row in unique_rows if row['amount'] < 0)
     return Response({
         'batch_id': batch.id,
         'summary': {
             'ingresos': round(ingresos, 2),
             'egresos': round(abs(egresos), 2),
             'neto': round(ingresos + egresos, 2),
-            'desde': fecha_desde.isoformat(),
-            'hasta': fecha_hasta.isoformat(),
-            'movimientos': len(rows),
+            'desde': batch.fecha_desde.isoformat(),
+            'hasta': batch.fecha_hasta.isoformat(),
+            'movimientos': len(unique_rows),
+            'movimientos_total': len(rows),
+            'duplicados': duplicate_count,
         }
     })
 
