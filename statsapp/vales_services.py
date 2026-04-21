@@ -172,6 +172,8 @@ def _prefix_related(left, right, min_size=3):
         return False
     if min(len(left), len(right)) < min_size:
         return False
+    if min(len(left), len(right)) / max(len(left), len(right)) < 0.7:
+        return False
     return left.startswith(right) or right.startswith(left)
 
 

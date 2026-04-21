@@ -47,6 +47,12 @@ class ValesApiTests(APITestCase):
             last_name='V',
             phone='',
         )
+        self.vila = AccountClient.objects.create(
+            external_id='C-0998',
+            first_name='Miguel',
+            last_name='Vila',
+            phone='',
+        )
 
     def authenticate(self):
         response = self.client.post('/api/auth/login/', {
@@ -81,6 +87,7 @@ class ValesApiTests(APITestCase):
         self.assertEqual(best['cliente']['codigo'], 'C-0089')
         self.assertGreater(best['similitud'], 0.7)
         self.assertNotEqual(best['cliente']['codigo'], 'C-0999')
+        self.assertNotEqual(best['cliente']['codigo'], 'C-0998')
 
     def test_operator_can_create_client_from_vales_flow(self):
         response = self.client.post('/api/auth/login/', {
