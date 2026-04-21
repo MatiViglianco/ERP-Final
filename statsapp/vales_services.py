@@ -165,6 +165,16 @@ def _normalize_reason(alias_value, normalized_full, normalized_first, normalized
     return 'trigram'
 
 
+def _prefix_related(left, right, min_size=3):
+    left = (left or '').strip()
+    right = (right or '').strip()
+    if not left or not right:
+        return False
+    if min(len(left), len(right)) < min_size:
+        return False
+    return left.startswith(right) or right.startswith(left)
+
+
 def _python_suggest_clients(alias_value, limit):
     normalized_alias = normalize_search_text(alias_value)
     if not normalized_alias:
@@ -191,15 +201,12 @@ def _python_suggest_clients(alias_value, limit):
             ' '.join(token for token in [normalized_last, normalized_first] if token),
         ]
         exact = normalized_alias == normalized_full or normalized_alias in normalized_full.split()
-        prefix = any(variant and (variant.startswith(normalized_alias) or normalized_alias.startswith(variant)) for variant in search_variants)
+        prefix = any(_prefix_related(normalized_alias, variant) for variant in search_variants if variant)
         phonetic = any(soundex_alias and soundex_alias == simple_soundex(variant) for variant in search_variants if variant)
         ratio = max(SequenceMatcher(None, normalized_alias, variant).ratio() for variant in search_variants if variant)
         shape_variants = [normalize_name_shape(variant) for variant in search_variants if variant]
         shape_exact = bool(shape_alias) and any(shape_alias == variant for variant in shape_variants if variant)
-        shape_prefix = bool(shape_alias) and any(
-            variant and (variant.startswith(shape_alias) or shape_alias.startswith(variant))
-            for variant in shape_variants
-        )
+        shape_prefix = bool(shape_alias) and any(_prefix_related(shape_alias, variant) for variant in shape_variants if variant)
         shape_ratio = max(
             (SequenceMatcher(None, shape_alias, variant).ratio() for variant in shape_variants if variant and shape_alias),
             default=0,
