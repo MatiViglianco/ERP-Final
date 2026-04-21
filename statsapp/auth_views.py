@@ -10,6 +10,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, Toke
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .activity import touch_user_activity
+from .vales_services import auth_user_payload
 
 
 User = get_user_model()
@@ -20,12 +21,7 @@ REFRESH_COOKIE_SAMESITE = getattr(settings, 'JWT_REFRESH_COOKIE_SAMESITE', 'None
 
 
 def _user_payload(user):
-    return {
-        'id': user.id,
-        'username': user.get_username(),
-        'is_staff': user.is_staff,
-        'is_superuser': user.is_superuser,
-    }
+    return auth_user_payload(user)
 
 
 def _set_refresh_cookie(response, refresh_token):
@@ -65,7 +61,16 @@ class CookieTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
+        payload = request.data.copy()
+        if not payload.get('username') and payload.get('user'):
+            payload['username'] = payload.get('user')
+        if not payload.get('password') and payload.get('pass'):
+            payload['password'] = payload.get('pass')
+        serializer = self.get_serializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+        if 'access' in response.data:
+            response.data['token'] = response.data['access']
         refresh = response.data.pop('refresh', None)
         if refresh:
             _set_refresh_cookie(response, refresh)
@@ -102,6 +107,8 @@ class CookieTokenRefreshView(TokenRefreshView):
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
+        if 'access' in response.data:
+            response.data['token'] = response.data['access']
         refresh = response.data.pop('refresh', None)
         if refresh:
             _set_refresh_cookie(response, refresh)

@@ -28,6 +28,17 @@ from .auth_views import (
     LogoutView,
     CurrentUserView,
 )
+from .vales_views import (
+    health_status,
+    clientes_list,
+    clientes_aliases,
+    clientes_alias_detail,
+    clientes_sugerencias,
+    ocr_procesar,
+    vales_cargar,
+    vales_lotes,
+    vales_lote_detail,
+)
 
 urlpatterns = [
     path('upload/', upload_csv, name='upload_csv'),
@@ -55,4 +66,13 @@ urlpatterns = [
     path('auth/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/logout/', LogoutView.as_view(), name='api_logout'),
     path('auth/me/', CurrentUserView.as_view(), name='api_me'),
+    path('health/', health_status, name='health_status'),
+    path('clientes/', clientes_list, name='clientes_list'),
+    path('clientes/aliases/', clientes_aliases, name='clientes_aliases'),
+    path('clientes/aliases/<int:pk>/', clientes_alias_detail, name='clientes_alias_detail'),
+    path('clientes/sugerencias/', clientes_sugerencias, name='clientes_sugerencias'),
+    path('ocr/procesar/', ocr_procesar, name='ocr_procesar'),
+    path('vales/cargar/', vales_cargar, name='vales_cargar'),
+    path('vales/lotes/', vales_lotes, name='vales_lotes'),
+    path('vales/lotes/<str:lote_id>/', vales_lote_detail, name='vales_lote_detail'),
 ]

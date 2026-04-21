@@ -4,6 +4,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from .text_utils import normalize_search_text
+
 
 class UploadBatch(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
@@ -250,4 +252,76 @@ class UserActivity(models.Model):
     def touch(self):
         self.last_activity = timezone.now()
         self.save(update_fields=['last_activity'])
+
+
+class AccountClientAlias(models.Model):
+    client = models.ForeignKey(AccountClient, on_delete=models.CASCADE, related_name='aliases')
+    alias = models.CharField(max_length=120)
+    normalized_alias = models.CharField(max_length=120, unique=True)
+    auto_detected = models.BooleanField(default=False)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    uses = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['alias']
+        indexes = [
+            models.Index(fields=['normalized_alias']),
+            models.Index(fields=['client', 'alias']),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.alias = (self.alias or '').strip()
+        self.normalized_alias = normalize_search_text(self.alias)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.alias} -> {self.client.full_name}"
+
+
+class ValeImportBatch(models.Model):
+    lote_id = models.CharField(max_length=32, unique=True)
+    date = models.DateField()
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='vale_batches')
+    source_photo = models.FileField(upload_to='vales/', null=True, blank=True)
+    source_filenames = models.JSONField(default=list, blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['date']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.lote_id} ({self.date})"
+
+
+class ValeImportItem(models.Model):
+    batch = models.ForeignKey(ValeImportBatch, on_delete=models.CASCADE, related_name='items')
+    transaction = models.ForeignKey(AccountTransaction, on_delete=models.SET_NULL, null=True, blank=True, related_name='vale_items')
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    client = models.ForeignKey(AccountClient, on_delete=models.PROTECT, null=True, blank=True, related_name='vale_items')
+    client_raw = models.CharField(max_length=120)
+    detail = models.CharField(max_length=255, blank=True)
+    pending_review = models.BooleanField(default=False)
+    confidence = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal('1'))
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['batch', 'date']),
+            models.Index(fields=['client', 'date']),
+            models.Index(fields=['pending_review']),
+        ]
+
+    def __str__(self):
+        return f"{self.batch.lote_id} - {self.client_raw} - {self.amount}"
 
