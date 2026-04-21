@@ -1,0 +1,85 @@
+name: Deploy backend to Dokploy
+
+on:
+  workflow_run:
+    workflows: ["Backend CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch to deploy
+        required: false
+        default: main
+      sha:
+        description: Commit SHA to deploy
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dokploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve deploy target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_REF: ${{ inputs.ref }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          WORKFLOW_REF: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          FALLBACK_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+
+          event_name = os.environ["EVENT_NAME"]
+          if event_name == "workflow_dispatch":
+              ref = (os.environ.get("DISPATCH_REF") or "main").strip() or "main"
+              sha = (os.environ.get("DISPATCH_SHA") or os.environ.get("FALLBACK_SHA") or "").strip()
+          else:
+              ref = (os.environ.get("WORKFLOW_REF") or "main").strip() or "main"
+              sha = (os.environ.get("WORKFLOW_SHA") or "").strip()
+
+          if not sha:
+              raise SystemExit("Unable to resolve deploy SHA")
+
+          print(f"ref={ref}")
+          print(f"sha={sha}")
+          PY
+
+      - name: Install SSH key
+        env:
+          VPS_DOKPLOY_HOST: ${{ secrets.VPS_DOKPLOY_HOST }}
+          VPS_DOKPLOY_SSH_KEY: ${{ secrets.VPS_DOKPLOY_SSH_KEY }}
+        run: |
+          test -n "$VPS_DOKPLOY_HOST" || { echo "Missing VPS_DOKPLOY_HOST secret"; exit 1; }
+          test -n "$VPS_DOKPLOY_SSH_KEY" || { echo "Missing VPS_DOKPLOY_SSH_KEY secret"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_DOKPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$VPS_DOKPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Trigger Dokploy deploy
+        env:
+          VPS_DOKPLOY_HOST: ${{ secrets.VPS_DOKPLOY_HOST }}
+          VPS_DOKPLOY_USER: ${{ secrets.VPS_DOKPLOY_USER }}
+          DEPLOY_REF: ${{ steps.target.outputs.ref }}
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          test -n "$VPS_DOKPLOY_USER" || { echo "Missing VPS_DOKPLOY_USER secret"; exit 1; }
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes "${VPS_DOKPLOY_USER}@${VPS_DOKPLOY_HOST}" \
+            "/root/bin/deploy-erp-backend.sh '${DEPLOY_SHA}' '${DEPLOY_REF}'"
