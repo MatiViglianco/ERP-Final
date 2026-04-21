@@ -144,9 +144,13 @@ def ocr_procesar(request):
     enriched = []
     for idx, vale in enumerate(result.get('vales') or [], start=1):
         client = match_client_by_name(vale.get('cliente_raw'))
+        source_index = safe_int(vale.get('source_index'), -1)
+        source_filename = uploads[source_index].name if 0 <= source_index < len(uploads) else None
         enriched.append({
             'id': idx,
             **vale,
+            'source_index': source_index if source_index >= 0 else None,
+            'source_filename': source_filename,
             'cliente_id': str(client.id) if client else None,
             'cliente_nombre': client_payload(client)['nombre'] if client else None,
             'cliente_codigo': client_payload(client)['codigo'] if client else None,

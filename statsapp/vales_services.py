@@ -30,10 +30,10 @@ User = get_user_model()
 MOCK_OCR_RESULT = {
     'fecha_detectada': '2026-04-07',
     'vales': [
-        {'importe': 54731, 'cliente_raw': 'Silvi Farias', 'detalle': '', 'confianza': 0.94},
-        {'importe': 63868, 'cliente_raw': 'Juan Cornavilla', 'detalle': '', 'confianza': 0.88},
-        {'importe': 7560, 'cliente_raw': 'Valery', 'detalle': '', 'confianza': 0.95},
-        {'importe': 16944, 'cliente_raw': 'Heliosa', 'detalle': '', 'confianza': 0.62},
+        {'importe': 54731, 'cliente_raw': 'Silvi Farias', 'detalle': '', 'confianza': 0.94, 'source_index': 0},
+        {'importe': 63868, 'cliente_raw': 'Juan Cornavilla', 'detalle': '', 'confianza': 0.88, 'source_index': 0},
+        {'importe': 7560, 'cliente_raw': 'Valery', 'detalle': '', 'confianza': 0.95, 'source_index': 0},
+        {'importe': 16944, 'cliente_raw': 'Heliosa', 'detalle': '', 'confianza': 0.62, 'source_index': 0},
     ],
 }
 
@@ -337,6 +337,98 @@ def _merge_suggestions(*groups, limit=5):
     )[:limit]
 
 
+def _score_alias_feedback(alias_value, known_alias):
+    normalized_alias = normalize_search_text(alias_value)
+    normalized_known = (known_alias.normalized_alias or '').strip() or normalize_search_text(known_alias.alias)
+    if not normalized_alias or not normalized_known:
+        return 0.0
+    if normalized_alias == normalized_known:
+        return 1.0
+
+    prefix = _prefix_related(normalized_alias, normalized_known)
+    phonetic = simple_soundex(normalized_alias) and simple_soundex(normalized_alias) == simple_soundex(normalized_known)
+    ratio = SequenceMatcher(None, normalized_alias, normalized_known).ratio()
+
+    shape_alias = normalize_name_shape(normalized_alias)
+    shape_known = normalize_name_shape(normalized_known)
+    shape_exact = bool(shape_alias and shape_known) and shape_alias == shape_known
+    shape_prefix = bool(shape_alias and shape_known) and _prefix_related(shape_alias, shape_known)
+    shape_ratio = SequenceMatcher(None, shape_alias, shape_known).ratio() if shape_alias and shape_known else 0
+
+    score = 0.0
+    if shape_exact:
+        score = 0.9
+    elif prefix or shape_prefix:
+        score = 0.84
+    elif phonetic:
+        score = 0.76
+    elif max(ratio, shape_ratio) >= 0.82:
+        score = 0.72
+
+    if score <= 0:
+        return 0.0
+
+    usage_bonus = min(0.08, float(known_alias.uses or 0) * 0.01)
+    return round(min(score + usage_bonus, 0.98), 4)
+
+
+def _apply_alias_feedback(alias_value, suggestions, limit=5):
+    client_ids = [
+        str((item.get('cliente') or {}).get('id') or '')
+        for item in suggestions or []
+        if (item.get('cliente') or {}).get('id')
+    ]
+    if not client_ids:
+        return []
+
+    aliases = (
+        AccountClientAlias.objects
+        .select_related('client')
+        .filter(client_id__in=client_ids)
+        .order_by('-uses', 'alias')
+    )
+    aliases_by_client = {}
+    for alias in aliases:
+        aliases_by_client.setdefault(str(alias.client_id), []).append(alias)
+
+    reranked = []
+    for item in suggestions or []:
+        client = item.get('cliente') or {}
+        client_id = str(client.get('id') or '')
+        current_score = float(item.get('similitud') or 0)
+        best_alias = None
+        best_support = 0.0
+
+        for known_alias in aliases_by_client.get(client_id, []):
+            support = _score_alias_feedback(alias_value, known_alias)
+            if support > best_support:
+                best_support = support
+                best_alias = known_alias
+
+        if best_alias and best_support > current_score + 0.02:
+            reranked.append({
+                **item,
+                'similitud': round(min(best_support, 0.99), 4),
+                'motivo': 'aprendido',
+                'feedback_alias': best_alias.alias,
+                'feedback_usos': best_alias.uses,
+            })
+        elif best_alias and best_alias.uses >= 3:
+            reranked.append({
+                **item,
+                'similitud': round(min(current_score + 0.02, 0.99), 4),
+                'feedback_alias': best_alias.alias,
+                'feedback_usos': best_alias.uses,
+            })
+        else:
+            reranked.append(item)
+
+    return sorted(
+        reranked,
+        key=lambda item: (-float(item.get('similitud') or 0), (item.get('cliente') or {}).get('nombre') or ''),
+    )[:limit]
+
+
 def suggest_clients(alias_value, limit=5):
     normalized_alias = normalize_search_text(alias_value)
     if not normalized_alias:
@@ -360,7 +452,8 @@ def suggest_clients(alias_value, limit=5):
 
     postgres_results = _postgres_suggest_clients(alias_value, limit)
     python_results = _python_suggest_clients(alias_value, limit)
-    return _merge_suggestions(postgres_results, python_results, limit=limit)
+    merged = _merge_suggestions(postgres_results, python_results, limit=limit)
+    return _apply_alias_feedback(alias_value, merged, limit=limit)
 
 
 def ensure_alias(cliente, alias_value, auto_detected=False):
@@ -553,15 +646,22 @@ def _normalize_ocr_response(payload):
     result = payload if isinstance(payload, dict) else {}
     parsed_date = parse_client_date(result.get('fecha_detectada'))
     vales = []
+    source_count = max(safe_int(result.get('source_count'), 0), 0)
     for entry in result.get('vales') or []:
         amount = parse_decimal(entry.get('importe'))
         if amount <= Decimal('0'):
             continue
+        source_index = safe_int(entry.get('source_index'), -1)
+        if source_count == 1 and source_index < 0:
+            source_index = 0
+        if source_index < 0 or (source_count and source_index >= source_count):
+            source_index = None
         vales.append({
             'importe': float(amount),
             'cliente_raw': str(entry.get('cliente_raw') or '').strip(),
             'detalle': str(entry.get('detalle') or '').strip(),
             'confianza': max(0.0, min(float(entry.get('confianza') or 0), 1.0)),
+            'source_index': source_index,
         })
     return {
         'fecha_detectada': parsed_date.isoformat() if parsed_date else None,
@@ -573,10 +673,11 @@ def _ocr_prompt():
     return (
         'Extrae de esta hoja manuscrita de vales los items en JSON estricto. '
         'Devuelve un objeto con fecha_detectada en formato YYYY-MM-DD o null y un array vales. '
+        'Recibiras una o mas imagenes en orden; para cada vale incluye source_index empezando en 0 segun la imagen donde aparece. '
         'Si la hoja muestra solo dia y mes, completa el año actual. '
         'En los nombres manuscritos, la letra a muchas veces aparece cerrada o pegada al resto del trazo; '
         'no la confundas automaticamente con o, e o u y compara el nombre completo antes de decidir. '
-        'Cada vale debe tener importe numerico, cliente_raw string, detalle string y confianza de 0 a 1. '
+        'Cada vale debe tener importe numerico, cliente_raw string, detalle string, source_index integer y confianza de 0 a 1. '
         'Si no estas seguro, usa null para la fecha y baja la confianza del vale. '
         'Ignora ruido visual y no inventes valores.'
     )
@@ -611,12 +712,16 @@ def _ocr_response_schema():
                             'type': 'string',
                             'description': 'Detalle adicional del vale si existe; vacio si no hay.',
                         },
+                        'source_index': {
+                            'type': 'integer',
+                            'description': 'Indice 0-based de la imagen donde aparece el vale.',
+                        },
                         'confianza': {
                             'type': 'number',
                             'description': 'Confianza entre 0 y 1.',
                         },
                     },
-                    'required': ['importe', 'cliente_raw', 'detalle', 'confianza'],
+                    'required': ['importe', 'cliente_raw', 'detalle', 'source_index', 'confianza'],
                     'additionalProperties': False,
                 },
             },
@@ -744,6 +849,11 @@ def process_ocr_uploads(uploads):
         raw = _gemini_ocr_process(uploads)
     else:
         raise RuntimeError(f'OCR provider no soportado: {provider}')
+    if isinstance(raw, dict):
+        raw = {
+            **raw,
+            'source_count': len(uploads or []),
+        }
     return _normalize_ocr_response(raw)
 
 

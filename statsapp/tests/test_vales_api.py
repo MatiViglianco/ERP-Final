@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
-from statsapp.models import AccountClient, AccountTransaction, ValeImportBatch
+from statsapp.models import AccountClient, AccountClientAlias, AccountTransaction, ValeImportBatch
 
 
 User = get_user_model()
@@ -89,6 +89,35 @@ class ValesApiTests(APITestCase):
         self.assertNotEqual(best['cliente']['codigo'], 'C-0999')
         self.assertNotEqual(best['cliente']['codigo'], 'C-0998')
 
+    def test_client_suggestions_leverage_confirmed_alias_feedback(self):
+        self.authenticate()
+        feedback_target = AccountClient.objects.create(
+            external_id='C-0200',
+            first_name='Marta',
+            last_name='Gimenez',
+            phone='',
+        )
+        competitor = AccountClient.objects.create(
+            external_id='C-0201',
+            first_name='Matias',
+            last_name='Albano',
+            phone='',
+        )
+        AccountClientAlias.objects.create(
+            client=feedback_target,
+            alias='Abano Marta',
+            auto_detected=True,
+            uses=6,
+        )
+
+        response = self.client.get('/api/clientes/sugerencias/?alias=Avano Marta&limit=5')
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(response.data), 0)
+        best = response.data[0]
+        self.assertEqual(best['cliente']['codigo'], 'C-0200')
+        self.assertEqual(best['motivo'], 'aprendido')
+        self.assertNotEqual(best['cliente']['codigo'], competitor.external_id)
+
     def test_operator_can_create_client_from_vales_flow(self):
         response = self.client.post('/api/auth/login/', {
             'user': 'dario',
@@ -142,6 +171,8 @@ class ValesApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['fecha_detectada'], '2026-04-07')
         self.assertGreaterEqual(len(response.data['vales']), 1)
+        self.assertEqual(response.data['vales'][0]['source_index'], 0)
+        self.assertEqual(response.data['vales'][0]['source_filename'], 'vale-ejemplo.jpeg')
 
     @mock.patch.dict(os.environ, {
         'OCR_PROVIDER': 'gemini',
@@ -154,7 +185,7 @@ class ValesApiTests(APITestCase):
             'candidates': [{
                 'content': {
                     'parts': [{
-                        'text': '{"fecha_detectada":"2026-04-20","vales":[{"importe":12345,"cliente_raw":"Valery","detalle":"","confianza":0.91}]}'
+                        'text': '{"fecha_detectada":"2026-04-20","vales":[{"importe":12345,"cliente_raw":"Valery","detalle":"","source_index":0,"confianza":0.91}]}'
                     }]
                 }
             }]
@@ -166,3 +197,4 @@ class ValesApiTests(APITestCase):
         self.assertEqual(response.data['fecha_detectada'], '2026-04-20')
         self.assertEqual(len(response.data['vales']), 1)
         self.assertEqual(response.data['vales'][0]['importe'], 12345.0)
+        self.assertEqual(response.data['vales'][0]['source_index'], 0)
