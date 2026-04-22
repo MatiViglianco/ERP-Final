@@ -36,6 +36,7 @@ from .vales_views import (
     clientes_sugerencias,
     ocr_procesar,
     vales_cargar,
+    vales_item_resolver,
     vales_lotes,
     vales_lote_detail,
 )
@@ -75,4 +76,5 @@ urlpatterns = [
     path('vales/cargar/', vales_cargar, name='vales_cargar'),
     path('vales/lotes/', vales_lotes, name='vales_lotes'),
     path('vales/lotes/<str:lote_id>/', vales_lote_detail, name='vales_lote_detail'),
+    path('vales/items/<int:item_id>/resolver/', vales_item_resolver, name='vales_item_resolver'),
 ]

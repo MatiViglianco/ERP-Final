@@ -7,7 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import AccountClient, AccountClientAlias, ValeImportBatch
+from .models import AccountClient, AccountClientAlias, ValeImportBatch, ValeImportItem
 from .vales_services import (
     alias_payload,
     client_payload,
@@ -17,8 +17,10 @@ from .vales_services import (
     match_client_by_name,
     parse_client_date,
     process_ocr_uploads,
+    resolve_vale_import_item,
     safe_int,
     serialize_batch,
+    serialize_vale_item,
     suggest_clients,
 )
 
@@ -220,3 +222,41 @@ def vales_lote_detail(request, lote_id):
     if not batch:
         return Response({'detail': 'Lote no encontrado'}, status=status.HTTP_404_NOT_FOUND)
     return Response(serialize_batch(batch, include_items=True))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def vales_item_resolver(request, item_id):
+    item = (
+        ValeImportItem.objects
+        .select_related('batch', 'client', 'transaction')
+        .filter(pk=item_id)
+        .first()
+    )
+    if not item:
+        return Response({'detail': 'Vale no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    client_id = request.data.get('cliente_id')
+    if not client_id:
+        return Response({'detail': 'cliente_id es obligatorio'}, status=status.HTTP_400_BAD_REQUEST)
+
+    client = AccountClient.objects.filter(pk=client_id).first()
+    if not client:
+        return Response({'detail': 'Cliente no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    create_alias = request.data.get('crear_alias', True)
+    if isinstance(create_alias, str):
+        create_alias = create_alias.strip().lower() not in {'0', 'false', 'no'}
+
+    item, warnings = resolve_vale_import_item(
+        item=item,
+        client=client,
+        user=request.user,
+        create_alias=bool(create_alias),
+    )
+    return Response({
+        'item': serialize_vale_item(item),
+        'lote_id': item.batch.lote_id,
+        'pendientes_count': item.batch.items.filter(pending_review=True).count(),
+        'warnings': warnings,
+    })

@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
-from statsapp.models import AccountClient, AccountClientAlias, AccountTransaction, ValeImportBatch
+from statsapp.models import AccountClient, AccountClientAlias, AccountTransaction, ValeImportBatch, ValeImportItem
 
 
 User = get_user_model()
@@ -162,6 +162,47 @@ class ValesApiTests(APITestCase):
         self.assertEqual(batch.items.count(), 2)
         self.assertEqual(batch.items.filter(pending_review=True).count(), 1)
         self.assertEqual(AccountTransaction.objects.filter(client=self.silvina).count(), 1)
+
+    def test_pending_vale_item_can_be_resolved_from_history(self):
+        self.authenticate()
+        payload = {
+            'fecha': '2026-04-07',
+            'source_filenames': ['vale-pendiente.jpeg'],
+            'vales': [
+                {
+                    'importe': 7560,
+                    'cliente_id': None,
+                    'cliente_raw': 'Jorge Soucedo',
+                    'detalle': 'Vale pendiente',
+                    'confianza': 0.41,
+                },
+            ],
+        }
+        create_response = self.client.post('/api/vales/cargar/', payload, format='json')
+        self.assertEqual(create_response.status_code, 201)
+
+        item = ValeImportItem.objects.get()
+        self.assertTrue(item.pending_review)
+        self.assertIsNone(item.transaction_id)
+
+        resolve_response = self.client.post(
+            f'/api/vales/items/{item.id}/resolver/',
+            {
+                'cliente_id': str(self.valeria.id),
+            },
+            format='json',
+        )
+        self.assertEqual(resolve_response.status_code, 200)
+
+        item.refresh_from_db()
+        self.assertFalse(item.pending_review)
+        self.assertEqual(item.client_id, self.valeria.id)
+        self.assertIsNotNone(item.transaction_id)
+        self.assertEqual(resolve_response.data['pendientes_count'], 0)
+        self.assertEqual(AccountTransaction.objects.filter(client=self.valeria).count(), 1)
+        self.assertTrue(
+            AccountClientAlias.objects.filter(client=self.valeria, alias='Jorge Soucedo').exists()
+        )
 
     @mock.patch.dict(os.environ, {'OCR_PROVIDER': 'mock'}, clear=False)
     def test_ocr_process_returns_mock_payload(self):

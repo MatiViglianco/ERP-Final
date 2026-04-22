@@ -604,19 +604,23 @@ def serialize_batch(batch, include_items=False):
         payload['pendientes_count'] = batch.items.filter(pending_review=True).count()
     if include_items:
         payload['vales'] = [
-            {
-                'id': item.id,
-                'fecha': item.date.isoformat() if item.date else None,
-                'importe': float(item.amount or 0),
-                'cliente': client_payload(item.client),
-                'cliente_raw': item.client_raw,
-                'detalle': item.detail or '',
-                'pendiente_revision': item.pending_review,
-                'confianza': float(item.confidence or 0),
-            }
+            serialize_vale_item(item)
             for item in batch.items.select_related('client').order_by('id')
         ]
     return payload
+
+
+def serialize_vale_item(item):
+    return {
+        'id': item.id,
+        'fecha': item.date.isoformat() if item.date else None,
+        'importe': float(item.amount or 0),
+        'cliente': client_payload(item.client),
+        'cliente_raw': item.client_raw,
+        'detalle': item.detail or '',
+        'pendiente_revision': item.pending_review,
+        'confianza': float(item.confidence or 0),
+    }
 
 
 def _http_json(url, payload, headers, timeout=90):
@@ -863,6 +867,96 @@ def _transaction_status_for_date(tx_date):
     if tx_date and tx_date < start_of_month:
         return AccountTransaction.Status.OVERDUE
     return AccountTransaction.Status.ACTIVE
+
+
+def _vale_row_index(item):
+    meta_value = safe_int((item.meta or {}).get('row_index'), 0)
+    if meta_value > 0:
+        return meta_value
+    return (
+        item.batch.items
+        .filter(id__lte=item.id)
+        .count()
+    )
+
+
+def _create_or_update_vale_transaction(*, item, client):
+    row_index = _vale_row_index(item)
+    payload = {
+        'client': client,
+        'description': item.detail or f"Vale {item.batch.lote_id}",
+        'date': item.date,
+        'created_at': timezone.now(),
+        'original_amount': item.amount,
+        'paid_amount': Decimal('0'),
+        'status': _transaction_status_for_date(item.date),
+        'payments': [],
+        'meta': {
+            'source': 'transform_vales_carni',
+            'cliente_raw': item.client_raw,
+            'lote_id': item.batch.lote_id,
+            'row_index': row_index,
+        },
+    }
+
+    if item.transaction_id:
+        transaction_obj = item.transaction
+        for field, value in payload.items():
+            setattr(transaction_obj, field, value)
+        transaction_obj.save(update_fields=[
+            'client',
+            'description',
+            'date',
+            'created_at',
+            'original_amount',
+            'paid_amount',
+            'status',
+            'payments',
+            'meta',
+            'updated_at',
+        ])
+        return transaction_obj
+
+    return AccountTransaction.objects.create(
+        external_id=f"vale-{uuid4().hex}",
+        **payload,
+    )
+
+
+def resolve_vale_import_item(*, item, client, user=None, create_alias=True):
+    touched_client_ids = set()
+    warnings = []
+
+    with db_transaction.atomic():
+        previous_client_id = item.client_id
+        transaction_obj = _create_or_update_vale_transaction(item=item, client=client)
+        item.client = client
+        item.transaction = transaction_obj
+        item.pending_review = False
+        meta = dict(item.meta or {})
+        meta.update({
+            'source': 'transform_vales_carni',
+            'resolved_by': getattr(user, 'username', '') or getattr(user, 'get_username', lambda: '')(),
+            'resolved_at': timezone.now().isoformat(),
+            'row_index': _vale_row_index(item),
+        })
+        item.meta = meta
+        item.save(update_fields=['client', 'transaction', 'pending_review', 'meta'])
+        touched_client_ids.add(client.id)
+        if previous_client_id and previous_client_id != client.id:
+            touched_client_ids.add(previous_client_id)
+
+        if create_alias and item.client_raw:
+            try:
+                alias, _ = ensure_alias(client, item.client_raw, auto_detected=True)
+                AccountClientAlias.objects.filter(pk=alias.pk).update(uses=F('uses') + 1)
+            except LookupError:
+                warnings.append('El alias OCR ya estaba vinculado a otro cliente y no se reemplazo.')
+
+        recalc_account_totals(list(touched_client_ids))
+
+    item.refresh_from_db()
+    return item, warnings
 
 
 def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None):
