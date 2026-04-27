@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction as db_transaction
-from django.db.models import F
+from django.db.models import F, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -25,6 +26,53 @@ from .text_utils import build_initials, normalize_name_shape, normalize_search_t
 
 
 User = get_user_model()
+
+OCR_NAME_STOPWORDS = {
+    'a',
+    'al',
+    'de',
+    'del',
+    'el',
+    'la',
+    'las',
+    'los',
+    'mp',
+    'por',
+    'retiro',
+    'retiros',
+    'transferencia',
+    'transf',
+    'vale',
+    'vales',
+}
+
+TOKEN_ALIASES = {
+    'ale': ['alejandro', 'alejandra'],
+    'cezar': ['cesar'],
+    'cris': ['cristian', 'cristina'],
+    'crist': ['cristian', 'cristina'],
+    'facu': ['facundo'],
+    'gabi': ['gabriel', 'gabriela'],
+    'gonza': ['gonzalo'],
+    'jony': ['jonathan'],
+    'juancho': ['juan'],
+    'lucho': ['luis'],
+    'mati': ['matias'],
+    'max': ['maximiliano', 'maximo'],
+    'maxi': ['maximiliano', 'maximo'],
+    'mica': ['micaela'],
+    'nacho': ['ignacio'],
+    'nati': ['natalia'],
+    'naty': ['natalia'],
+    'nico': ['nicolas'],
+    'pancho': ['francisco'],
+    'seba': ['sebastian'],
+    'tincho': ['martin'],
+    'vale': ['valeria', 'valentina'],
+    'valen': ['valeria', 'valentina'],
+    'valeny': ['valeria', 'valentina'],
+    'valery': ['valeria'],
+}
 
 
 MOCK_OCR_RESULT = {
@@ -83,6 +131,19 @@ def parse_client_date(value):
     return None
 
 
+def normalize_vale_date_year(value):
+    parsed = parse_client_date(value)
+    if not parsed:
+        return None
+    current_year = timezone.localdate().year
+    if parsed.year == current_year:
+        return parsed
+    try:
+        return parsed.replace(year=current_year)
+    except ValueError:
+        return parsed.replace(year=current_year, day=28)
+
+
 def parse_decimal(value, default='0'):
     if value in (None, ''):
         return Decimal(default)
@@ -90,6 +151,144 @@ def parse_decimal(value, default='0'):
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return Decimal(default)
+
+
+def _parse_ocr_amount_component(value):
+    if value in (None, ''):
+        return Decimal('0')
+    if isinstance(value, (int, float, Decimal)):
+        return parse_decimal(value)
+
+    raw = str(value).strip()
+    if not raw:
+        return Decimal('0')
+    cleaned = re.sub(r'[^\d,.\-]', '', raw)
+    if not re.search(r'\d', cleaned):
+        return Decimal('0')
+
+    negative = cleaned.startswith('-')
+    cleaned = cleaned.lstrip('-')
+
+    # OCR de importes argentinos suele usar "." como miles: 13.570 => 13570.
+    if re.search(r'[.,]\d{1,2}$', cleaned) and not re.search(r'[.,]\d{3}([.,]|$)', cleaned):
+        decimal_sep = cleaned[-3]
+        if decimal_sep == ',':
+            normalized = cleaned.replace('.', '').replace(',', '.')
+        else:
+            normalized = cleaned.replace(',', '')
+    else:
+        normalized = re.sub(r'\D', '', cleaned)
+
+    if not normalized:
+        return Decimal('0')
+    try:
+        amount = Decimal(normalized)
+    except InvalidOperation:
+        amount = Decimal('0')
+    return -amount if negative else amount
+
+
+def _split_ocr_amount_values(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and '+' in value:
+        return [part for part in value.split('+') if part.strip()]
+    return [value]
+
+
+def _format_ocr_amount_part(value):
+    amount = _parse_ocr_amount_component(value)
+    if amount <= Decimal('0'):
+        return ''
+    if amount == amount.to_integral_value():
+        return str(int(amount))
+    return str(amount).rstrip('0').rstrip('.')
+
+
+def _parse_ocr_amount(entry):
+    raw_values = (
+        entry.get('importes')
+        or entry.get('montos')
+        or _split_ocr_amount_values(entry.get('importe'))
+    )
+    if not isinstance(raw_values, list):
+        raw_values = [raw_values]
+
+    parts = [_parse_ocr_amount_component(value) for value in raw_values]
+    parts = [part for part in parts if part > Decimal('0')]
+    amount = sum(parts, Decimal('0'))
+
+    breakdown = ''
+    if len(parts) > 1:
+        formatted = [_format_ocr_amount_part(value) for value in raw_values]
+        breakdown = ' + '.join(part for part in formatted if part)
+    return amount, breakdown
+
+
+def _coerce_bbox_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_ocr_bbox(value):
+    if not value:
+        return None
+
+    if isinstance(value, dict):
+        raw_values = {
+            'x': value.get('x', value.get('left')),
+            'y': value.get('y', value.get('top')),
+            'w': value.get('w', value.get('width')),
+            'h': value.get('h', value.get('height')),
+            'right': value.get('right'),
+            'bottom': value.get('bottom'),
+        }
+    elif isinstance(value, (list, tuple)) and len(value) >= 4:
+        raw_values = {'x': value[0], 'y': value[1], 'w': value[2], 'h': value[3]}
+    else:
+        return None
+
+    numeric = {
+        key: _coerce_bbox_number(raw)
+        for key, raw in raw_values.items()
+        if raw not in (None, '')
+    }
+    if numeric.get('x') is None or numeric.get('y') is None:
+        return None
+
+    max_value = max((abs(item) for item in numeric.values()), default=0)
+    if max_value > 100:
+        return None
+    scale = Decimal('0.01') if max_value > 1 else Decimal('1')
+
+    x = Decimal(str(numeric['x'])) * scale
+    y = Decimal(str(numeric['y'])) * scale
+    if numeric.get('w') is not None and numeric.get('h') is not None:
+        w = Decimal(str(numeric['w'])) * scale
+        h = Decimal(str(numeric['h'])) * scale
+    elif numeric.get('right') is not None and numeric.get('bottom') is not None:
+        right = Decimal(str(numeric['right'])) * scale
+        bottom = Decimal(str(numeric['bottom'])) * scale
+        w = right - x
+        h = bottom - y
+    else:
+        return None
+
+    x = max(Decimal('0'), min(x, Decimal('1')))
+    y = max(Decimal('0'), min(y, Decimal('1')))
+    w = max(Decimal('0'), min(w, Decimal('1') - x))
+    h = max(Decimal('0'), min(h, Decimal('1') - y))
+    if w <= Decimal('0.005') or h <= Decimal('0.005'):
+        return None
+
+    return {
+        'x': float(round(x, 4)),
+        'y': float(round(y, 4)),
+        'w': float(round(w, 4)),
+        'h': float(round(h, 4)),
+    }
 
 
 def full_client_name(client):
@@ -177,6 +376,116 @@ def _prefix_related(left, right, min_size=3):
     return left.startswith(right) or right.startswith(left)
 
 
+def _name_tokens(value, *, keep_stopwords=False):
+    tokens = [
+        token
+        for token in normalize_search_text(value).split()
+        if len(token) >= 2
+    ]
+    if keep_stopwords:
+        return tokens
+    return [
+        token
+        for token in tokens
+        if token not in OCR_NAME_STOPWORDS and len(token) >= 3
+    ]
+
+
+def _token_variants(token):
+    variants = {token}
+    variants.update(TOKEN_ALIASES.get(token, []))
+    if token.endswith('y') and len(token) > 3:
+        variants.add(token[:-1] + 'i')
+    if token.endswith('o') and len(token) > 4:
+        variants.add(token[:-1] + 'a')
+    if token.endswith('a') and len(token) > 4:
+        variants.add(token[:-1] + 'o')
+    return variants
+
+
+def _single_token_similarity(left, right):
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+
+    best = 0.0
+    for left_variant in _token_variants(left):
+        for right_variant in _token_variants(right):
+            if left_variant == right_variant:
+                best = max(best, 0.98)
+                continue
+            shorter, longer = sorted([left_variant, right_variant], key=len)
+            if len(shorter) >= 4 and longer.startswith(shorter):
+                best = max(best, 0.92)
+            elif len(shorter) >= 3 and longer.startswith(shorter) and len(longer) <= 7:
+                best = max(best, 0.84)
+            best = max(best, SequenceMatcher(None, left_variant, right_variant).ratio())
+
+            shape_left = normalize_name_shape(left_variant)
+            shape_right = normalize_name_shape(right_variant)
+            if shape_left and shape_right:
+                if shape_left == shape_right:
+                    best = max(best, 0.9)
+                elif _prefix_related(shape_left, shape_right):
+                    best = max(best, 0.84)
+                best = max(best, SequenceMatcher(None, shape_left, shape_right).ratio() * 0.96)
+
+            if len(left_variant) >= 4 and len(right_variant) >= 4 and simple_soundex(left_variant) == simple_soundex(right_variant):
+                best = max(best, 0.76)
+    return min(best, 1.0)
+
+
+def _token_match_score(raw_name, client):
+    raw_tokens = _name_tokens(raw_name)
+    if not raw_tokens:
+        return 0.0, False
+
+    client_tokens = []
+    for token in _name_tokens(client.first_name, keep_stopwords=True) + _name_tokens(client.last_name, keep_stopwords=True):
+        if token and token not in client_tokens:
+            client_tokens.append(token)
+    if not client_tokens:
+        return 0.0, False
+
+    remaining = list(client_tokens)
+    scores = []
+    for raw_token in raw_tokens:
+        best_idx = -1
+        best_score = 0.0
+        for idx, client_token in enumerate(remaining):
+            score = _single_token_similarity(raw_token, client_token)
+            if score > best_score:
+                best_idx = idx
+                best_score = score
+        if best_idx >= 0:
+            remaining.pop(best_idx)
+        scores.append(best_score)
+
+    if not scores:
+        return 0.0, False
+
+    strong_matches = sum(1 for score in scores if score >= 0.84)
+    usable_matches = sum(1 for score in scores if score >= 0.72)
+    avg_score = sum(scores) / len(scores)
+    best_score = max(scores)
+
+    if len(raw_tokens) == 1:
+        token = raw_tokens[0]
+        if len(token) < 4 or token in TOKEN_ALIASES:
+            return (best_score if best_score >= 0.94 else 0.0), best_score >= 0.94
+        return best_score, best_score >= 0.88
+
+    if usable_matches == len(scores) and strong_matches >= 1:
+        avg_score = max(avg_score, 0.84)
+    if strong_matches == len(scores):
+        avg_score = max(avg_score, 0.9)
+    if best_score >= 0.94 and usable_matches >= len(scores) - 1:
+        avg_score = max(avg_score, 0.86)
+
+    return min(avg_score, 0.99), usable_matches == len(scores)
+
+
 def _python_suggest_clients(alias_value, limit):
     normalized_alias = normalize_search_text(alias_value)
     if not normalized_alias:
@@ -206,6 +515,7 @@ def _python_suggest_clients(alias_value, limit):
         prefix = any(_prefix_related(normalized_alias, variant) for variant in search_variants if variant)
         phonetic = any(soundex_alias and soundex_alias == simple_soundex(variant) for variant in search_variants if variant)
         ratio = max(SequenceMatcher(None, normalized_alias, variant).ratio() for variant in search_variants if variant)
+        token_score, token_coverage = _token_match_score(alias_value, client)
         shape_variants = [normalize_name_shape(variant) for variant in search_variants if variant]
         shape_exact = bool(shape_alias) and any(shape_alias == variant for variant in shape_variants if variant)
         shape_prefix = bool(shape_alias) and any(_prefix_related(shape_alias, variant) for variant in shape_variants if variant)
@@ -213,13 +523,17 @@ def _python_suggest_clients(alias_value, limit):
             (SequenceMatcher(None, shape_alias, variant).ratio() for variant in shape_variants if variant and shape_alias),
             default=0,
         )
-        handwritten_hint = shape_exact or shape_prefix or shape_ratio >= 0.88
-        score = ratio
+        handwritten_hint = shape_exact or shape_prefix or shape_ratio >= 0.88 or (token_coverage and token_score >= 0.82)
+        score = max(ratio, token_score)
 
         if exact:
             score = max(score, 0.98)
         elif prefix:
             score = max(score, 0.86)
+        elif token_score >= 0.9:
+            score = max(score, token_score)
+        elif token_coverage and token_score >= 0.82:
+            score = max(score, token_score)
         elif phonetic:
             score = max(score, 0.72)
         elif shape_exact:
@@ -417,6 +731,7 @@ def _apply_alias_feedback(alias_value, suggestions, limit=5):
             reranked.append({
                 **item,
                 'similitud': round(min(current_score + 0.02, 0.99), 4),
+                'motivo': 'aprendido' if best_support >= 0.72 else item.get('motivo', 'similar'),
                 'feedback_alias': best_alias.alias,
                 'feedback_usos': best_alias.uses,
             })
@@ -449,6 +764,9 @@ def suggest_clients(alias_value, limit=5):
             }
             for alias in exact_aliases[:limit]
         ]
+
+    if not _name_tokens(alias_value):
+        return []
 
     postgres_results = _postgres_suggest_clients(alias_value, limit)
     python_results = _python_suggest_clients(alias_value, limit)
@@ -536,22 +854,63 @@ def create_account_client(display_name, phone='', external_id=None):
 
 
 def match_client_by_name(raw_name):
+    match = match_client_for_ocr(raw_name, limit=1)
+    return match.get('client')
+
+
+def _should_auto_match(suggestions):
+    if not suggestions:
+        return False
+    best = suggestions[0]
+    score = float(best.get('similitud') or 0)
+    motivo = best.get('motivo') or ''
+    second_score = float(suggestions[1].get('similitud') or 0) if len(suggestions) > 1 else 0
+    gap = score - second_score
+
+    if score >= 0.94:
+        return True
+    if score >= 0.9 and gap >= 0.04:
+        return True
+    if score >= 0.84 and gap >= 0.08 and motivo in {'aprendido', 'exacto', 'manuscrito', 'prefijo', 'diminutivo'}:
+        return True
+    return False
+
+
+def match_client_for_ocr(raw_name, limit=4):
     normalized = normalize_search_text(raw_name)
     if not normalized:
-        return None
+        return {'client': None, 'suggestions': [], 'auto': False, 'match': None}
 
     alias = AccountClientAlias.objects.select_related('client').filter(normalized_alias=normalized).first()
     if alias:
-        return alias.client
+        suggestion = {
+            'cliente': client_payload(alias.client),
+            'similitud': 1.0,
+            'motivo': 'alias',
+        }
+        return {'client': alias.client, 'suggestions': [suggestion], 'auto': True, 'match': suggestion}
 
-    clients = list(AccountClient.objects.all())
-    exact = next((client for client in clients if normalize_search_text(full_client_name(client)) == normalized), None)
+    exact = next(
+        (
+            client
+            for client in AccountClient.objects.all().order_by('last_name', 'first_name')
+            if normalize_search_text(full_client_name(client)) == normalized
+        ),
+        None,
+    )
     if exact:
-        return exact
-    suggestions = suggest_clients(raw_name, 1)
-    if suggestions and suggestions[0]['similitud'] >= 0.92:
-        return AccountClient.objects.filter(pk=suggestions[0]['cliente']['id']).first()
-    return None
+        suggestion = {
+            'cliente': client_payload(exact),
+            'similitud': 1.0,
+            'motivo': 'exacto',
+        }
+        return {'client': exact, 'suggestions': [suggestion], 'auto': True, 'match': suggestion}
+
+    suggestions = suggest_clients(raw_name, limit)
+    if _should_auto_match(suggestions):
+        client = AccountClient.objects.filter(pk=suggestions[0]['cliente']['id']).first()
+        return {'client': client, 'suggestions': suggestions, 'auto': bool(client), 'match': suggestions[0] if client else None}
+    return {'client': None, 'suggestions': suggestions, 'auto': False, 'match': suggestions[0] if suggestions else None}
 
 
 def recalc_account_totals(client_ids=None):
@@ -590,14 +949,18 @@ def recalc_account_totals(client_ids=None):
 
 
 def serialize_batch(batch, include_items=False):
+    account_items_qs = batch.items.filter(transaction__isnull=False)
+    account_total = account_items_qs.aggregate(total=Sum('amount')).get('total') or Decimal('0')
     payload = {
         'lote_id': batch.lote_id,
         'fecha': batch.date.isoformat() if batch.date else None,
         'total': float(batch.total or 0),
+        'cuenta_corriente_total': float(account_total),
         'cargado_por': auth_user_payload(batch.uploaded_by) if batch.uploaded_by else None,
         'cargado_en': batch.created_at.isoformat() if batch.created_at else None,
         'source_filenames': batch.source_filenames or [],
         'vales_count': getattr(batch, 'vales_count', None) or batch.items.count(),
+        'cuenta_corriente_count': account_items_qs.count(),
         'pendientes_count': getattr(batch, 'pendientes_count', None),
     }
     if payload['pendientes_count'] is None:
@@ -605,12 +968,13 @@ def serialize_batch(batch, include_items=False):
     if include_items:
         payload['vales'] = [
             serialize_vale_item(item)
-            for item in batch.items.select_related('client').order_by('id')
+            for item in batch.items.select_related('client', 'transaction').order_by('id')
         ]
     return payload
 
 
 def serialize_vale_item(item):
+    meta = item.meta or {}
     return {
         'id': item.id,
         'fecha': item.date.isoformat() if item.date else None,
@@ -619,7 +983,9 @@ def serialize_vale_item(item):
         'cliente_raw': item.client_raw,
         'detalle': item.detail or '',
         'pendiente_revision': item.pending_review,
+        'en_cuenta_corriente': bool(item.transaction_id),
         'confianza': float(item.confidence or 0),
+        'bbox': meta.get('bbox'),
     }
 
 
@@ -648,24 +1014,31 @@ def _make_data_url(upload):
 
 def _normalize_ocr_response(payload):
     result = payload if isinstance(payload, dict) else {}
-    parsed_date = parse_client_date(result.get('fecha_detectada'))
+    parsed_date = normalize_vale_date_year(result.get('fecha_detectada'))
     vales = []
     source_count = max(safe_int(result.get('source_count'), 0), 0)
     for entry in result.get('vales') or []:
-        amount = parse_decimal(entry.get('importe'))
+        amount, amount_breakdown = _parse_ocr_amount(entry)
         if amount <= Decimal('0'):
             continue
+        detail = str(entry.get('detalle') or '').strip()
+        if amount_breakdown and amount_breakdown not in detail:
+            detail = amount_breakdown if not detail else f'{amount_breakdown} - {detail}'
         source_index = safe_int(entry.get('source_index'), -1)
         if source_count == 1 and source_index < 0:
             source_index = 0
         if source_index < 0 or (source_count and source_index >= source_count):
             source_index = None
+        bbox = _normalize_ocr_bbox(
+            entry.get('bbox') or entry.get('line_bbox') or entry.get('bounds')
+        )
         vales.append({
             'importe': float(amount),
             'cliente_raw': str(entry.get('cliente_raw') or '').strip(),
-            'detalle': str(entry.get('detalle') or '').strip(),
+            'detalle': detail,
             'confianza': max(0.0, min(float(entry.get('confianza') or 0), 1.0)),
             'source_index': source_index,
+            'bbox': bbox,
         })
     return {
         'fecha_detectada': parsed_date.isoformat() if parsed_date else None,
@@ -674,16 +1047,24 @@ def _normalize_ocr_response(payload):
 
 
 def _ocr_prompt():
+    today = timezone.localdate()
     return (
-        'Extrae de esta hoja manuscrita de vales los items en JSON estricto. '
-        'Devuelve un objeto con fecha_detectada en formato YYYY-MM-DD o null y un array vales. '
+        'Extrae de fotos de hojas manuscritas de una carniceria solamente la seccion VALES. '
+        'Devuelve JSON estricto con fecha_detectada en formato YYYY-MM-DD o null y un array vales. '
+        f'Hoy es {today.isoformat()} y el ano operativo es {today.year}; si la hoja muestra solo dia/mes o el ano no se ve claro, usa {today.year}. '
         'Recibiras una o mas imagenes en orden; para cada vale incluye source_index empezando en 0 segun la imagen donde aparece. '
-        'Si la hoja muestra solo dia y mes, completa el año actual. '
-        'En los nombres manuscritos, la letra a muchas veces aparece cerrada o pegada al resto del trazo; '
-        'no la confundas automaticamente con o, e o u y compara el nombre completo antes de decidir. '
+        'Para cada vale incluye bbox con la caja aproximada de todo el renglon del vale en coordenadas normalizadas 0 a 1 relativas a la imagen completa: x, y, w, h. '
+        'La caja debe cubrir importe y nombre del mismo renglon; si no podes ubicarlo con confianza, usa bbox null. '
+        'Ignora encabezados, gastos, retiros, transferencias, totales, tachaduras decorativas y notas que no sean vales. '
+        'Cada linea de vale suele tener importe a la izquierda y nombre o alias de cliente a la derecha. '
+        'Si una misma linea trae dos o mas importes para el mismo cliente, como "4388 + 9182 Cesar Ferrero", devolve un solo vale con importe igual a la suma y detalle con el desglose "4388 + 9182". '
+        'No conviertas palabras genericas como "vale", "vales", "mp", "gastos" o "retiros" en cliente_raw. '
+        'Si un nombre esta abreviado o parecido al real, conserva el texto tal como se lee: por ejemplo "Maxi Camp", "Matias Vigli", "Valen Belande". '
+        'No fuerces apellidos completos ni inventes clientes; el sistema despues hara el match contra la base. '
+        'En manuscritos, a/o/e/u pueden parecerse, n/m/r pueden confundirse y una coma puede indicar apellido-nombre; usa el contexto de toda la linea. '
         'Cada vale debe tener importe numerico, cliente_raw string, detalle string, source_index integer y confianza de 0 a 1. '
-        'Si no estas seguro, usa null para la fecha y baja la confianza del vale. '
-        'Ignora ruido visual y no inventes valores.'
+        'Si no estas seguro de un nombre, manten cliente_raw con tu mejor lectura y baja confianza. '
+        'Si no estas seguro de la fecha, usa null. No inventes importes ni nombres.'
     )
 
 
@@ -706,7 +1087,7 @@ def _ocr_response_schema():
                     'properties': {
                         'importe': {
                             'type': 'number',
-                            'description': 'Importe numerico del vale, sin moneda ni separadores de miles.',
+                            'description': 'Importe numerico total del vale, sin moneda ni separadores de miles. Si la linea tiene varios importes para el mismo cliente, usar la suma.',
                         },
                         'cliente_raw': {
                             'type': 'string',
@@ -714,7 +1095,7 @@ def _ocr_response_schema():
                         },
                         'detalle': {
                             'type': 'string',
-                            'description': 'Detalle adicional del vale si existe; vacio si no hay.',
+                            'description': 'Detalle adicional del vale. Si la linea trae varios importes para el mismo cliente, incluir el desglose, por ejemplo "4388 + 9182".',
                         },
                         'source_index': {
                             'type': 'integer',
@@ -724,8 +1105,32 @@ def _ocr_response_schema():
                             'type': 'number',
                             'description': 'Confianza entre 0 y 1.',
                         },
+                        'bbox': {
+                            'type': ['object', 'null'],
+                            'description': 'Caja aproximada del renglon del vale en coordenadas normalizadas 0..1 de la imagen completa. Null si no se puede ubicar.',
+                            'properties': {
+                                'x': {
+                                    'type': 'number',
+                                    'description': 'Posicion horizontal izquierda normalizada entre 0 y 1.',
+                                },
+                                'y': {
+                                    'type': 'number',
+                                    'description': 'Posicion vertical superior normalizada entre 0 y 1.',
+                                },
+                                'w': {
+                                    'type': 'number',
+                                    'description': 'Ancho normalizado entre 0 y 1.',
+                                },
+                                'h': {
+                                    'type': 'number',
+                                    'description': 'Alto normalizado entre 0 y 1.',
+                                },
+                            },
+                            'required': ['x', 'y', 'w', 'h'],
+                            'additionalProperties': False,
+                        },
                     },
-                    'required': ['importe', 'cliente_raw', 'detalle', 'source_index', 'confianza'],
+                    'required': ['importe', 'cliente_raw', 'detalle', 'source_index', 'confianza', 'bbox'],
                     'additionalProperties': False,
                 },
             },
@@ -824,7 +1229,7 @@ def _gemini_ocr_process(uploads):
             }
         })
 
-    model = os.environ.get('GEMINI_OCR_MODEL', 'gemini-2.5-flash').strip() or 'gemini-2.5-flash'
+    model = os.environ.get('GEMINI_OCR_MODEL', 'gemini-3-flash-preview').strip() or 'gemini-3-flash-preview'
     payload = {
         'contents': [{'parts': parts}],
         'generationConfig': {
@@ -882,6 +1287,7 @@ def _vale_row_index(item):
 
 def _create_or_update_vale_transaction(*, item, client):
     row_index = _vale_row_index(item)
+    item_meta = item.meta or {}
     payload = {
         'client': client,
         'description': item.detail or f"Vale {item.batch.lote_id}",
@@ -896,6 +1302,7 @@ def _create_or_update_vale_transaction(*, item, client):
             'cliente_raw': item.client_raw,
             'lote_id': item.batch.lote_id,
             'row_index': row_index,
+            'bbox': item_meta.get('bbox'),
         },
     }
 
@@ -959,7 +1366,88 @@ def resolve_vale_import_item(*, item, client, user=None, create_alias=True):
     return item, warnings
 
 
+def update_vale_batch_date(*, batch, batch_date):
+    batch_date = normalize_vale_date_year(batch_date)
+    if not batch_date:
+        raise ValueError('La fecha del lote es obligatoria')
+    touched_client_ids = set()
+    with db_transaction.atomic():
+        batch.date = batch_date
+        batch.save(update_fields=['date'])
+
+        items = list(batch.items.select_related('client', 'transaction'))
+        now = timezone.now()
+        transactions = []
+        for item in items:
+            item.date = batch_date
+            if item.client_id:
+                touched_client_ids.add(item.client_id)
+            if item.transaction_id:
+                transaction_obj = item.transaction
+                transaction_obj.date = batch_date
+                if transaction_obj.status in {
+                    AccountTransaction.Status.ACTIVE,
+                    AccountTransaction.Status.OVERDUE,
+                }:
+                    transaction_obj.status = _transaction_status_for_date(batch_date)
+                transaction_obj.updated_at = now
+                transactions.append(transaction_obj)
+
+        if items:
+            ValeImportItem.objects.bulk_update(items, ['date'], batch_size=500)
+        if transactions:
+            AccountTransaction.objects.bulk_update(transactions, ['date', 'status', 'updated_at'], batch_size=500)
+        if touched_client_ids:
+            recalc_account_totals(list(touched_client_ids))
+
+    batch.refresh_from_db()
+    return batch
+
+
+def delete_vale_batch(*, batch):
+    touched_client_ids = set(
+        batch.items
+        .filter(client_id__isnull=False)
+        .values_list('client_id', flat=True)
+    )
+    transaction_ids = set(
+        batch.items
+        .filter(transaction_id__isnull=False)
+        .values_list('transaction_id', flat=True)
+    )
+    transaction_ids.update(
+        AccountTransaction.objects
+        .filter(meta__lote_id=batch.lote_id)
+        .values_list('id', flat=True)
+    )
+    touched_client_ids.update(
+        AccountTransaction.objects
+        .filter(id__in=transaction_ids, client_id__isnull=False)
+        .values_list('client_id', flat=True)
+    )
+
+    deleted_items = batch.items.count()
+    deleted_transactions = len(transaction_ids)
+    lote_id = batch.lote_id
+
+    with db_transaction.atomic():
+        if transaction_ids:
+            AccountTransaction.objects.filter(id__in=transaction_ids).delete()
+        batch.delete()
+        if touched_client_ids:
+            recalc_account_totals(list(touched_client_ids))
+
+    return {
+        'lote_id': lote_id,
+        'items_deleted': deleted_items,
+        'transactions_deleted': deleted_transactions,
+    }
+
+
 def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None):
+    batch_date = normalize_vale_date_year(batch_date)
+    if not batch_date:
+        raise ValueError('La fecha del lote es obligatoria')
     lote_id = f"lote-{timezone.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
     source_filenames = source_filenames or []
     warnings = []
@@ -986,6 +1474,13 @@ def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None)
             client_raw = str(entry.get('cliente_raw') or '').strip()
             detail = str(entry.get('detalle') or '').strip()
             confidence = parse_decimal(entry.get('confianza') or 0, default='0')
+            bbox = _normalize_ocr_bbox(entry.get('bbox'))
+            item_meta = {
+                'source': 'transform_vales_carni',
+                'row_index': idx,
+            }
+            if bbox:
+                item_meta['bbox'] = bbox
             pending = client is None
             transaction_obj = None
             if client:
@@ -1004,6 +1499,7 @@ def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None)
                         'cliente_raw': client_raw,
                         'lote_id': lote_id,
                         'row_index': idx,
+                        'bbox': bbox,
                     },
                 )
                 touched_client_ids.add(client.id)
@@ -1025,7 +1521,7 @@ def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None)
                 detail=detail,
                 pending_review=pending,
                 confidence=confidence,
-                meta={'source': 'transform_vales_carni'},
+                meta=item_meta,
             )
             total += amount
 

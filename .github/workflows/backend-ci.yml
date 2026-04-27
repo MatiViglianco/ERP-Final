@@ -13,7 +13,9 @@ jobs:
     env:
       DJANGO_SECRET_KEY: ci-secret-key
       DJANGO_DEBUG: "False"
-      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      DJANGO_ALLOWED_HOSTS: api.mativiglianco.cloud,testserver
+      CORS_ALLOWED_ORIGINS: https://api.mativiglianco.cloud,https://vales.mativiglianco.cloud,https://mativiglianco.github.io
+      CSRF_TRUSTED_ORIGINS: https://api.mativiglianco.cloud,https://vales.mativiglianco.cloud,https://mativiglianco.github.io
     steps:
       - name: Checkout
         uses: actions/checkout@v4

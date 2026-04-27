@@ -7,7 +7,8 @@ def normalize_search_text(value):
         return ''
     normalized = unicodedata.normalize('NFKD', str(value))
     ascii_text = normalized.encode('ascii', 'ignore').decode('ascii')
-    collapsed = re.sub(r'\s+', ' ', ascii_text).strip().lower()
+    cleaned = re.sub(r'[^A-Za-z0-9]+', ' ', ascii_text)
+    collapsed = re.sub(r'\s+', ' ', cleaned).strip().lower()
     return collapsed
 
 

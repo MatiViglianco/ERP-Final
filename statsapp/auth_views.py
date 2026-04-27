@@ -42,7 +42,6 @@ def _clear_refresh_cookie(response):
         settings.JWT_REFRESH_COOKIE_NAME,
         path='/',
         samesite=REFRESH_COOKIE_SAMESITE,
-        secure=settings.JWT_COOKIE_SECURE,
     )
 
 

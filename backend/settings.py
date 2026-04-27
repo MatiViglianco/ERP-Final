@@ -5,17 +5,37 @@ import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def load_local_env_file(path):
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env_file(BASE_DIR / ".env")
+load_local_env_file(BASE_DIR / "backend" / ".env")
+
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
 # Producción por defecto; habilita DEBUG sólo si DJANGO_DEBUG=true está seteado.
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
-ALLOWED_HOSTS = [host for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if host]
+ALLOWED_HOSTS = [host for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "api.mativiglianco.cloud").split(",") if host]
 _default_cors = ",".join([
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    "https://api.mativiglianco.cloud",
+    "https://vales.mativiglianco.cloud",
     "https://mativiglianco.github.io",
 ])
 CORS_ALLOWED_ORIGINS = [origin for origin in os.environ.get("CORS_ALLOWED_ORIGINS", _default_cors).split(",") if origin]
 _default_csrf = ",".join([
+    "https://api.mativiglianco.cloud",
+    "https://vales.mativiglianco.cloud",
     "https://mativiglianco.github.io",
 ])
 CSRF_TRUSTED_ORIGINS = [origin for origin in os.environ.get("CSRF_TRUSTED_ORIGINS", _default_csrf).split(",") if origin]
