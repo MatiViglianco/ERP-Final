@@ -51,6 +51,8 @@ CORS_ALLOWED_ORIGINS=https://api.mativiglianco.cloud,https://vales.mativiglianco
 CSRF_TRUSTED_ORIGINS=https://api.mativiglianco.cloud,https://vales.mativiglianco.cloud,https://mativiglianco.github.io
 OCR_PROVIDER=gemini
 GEMINI_OCR_MODEL=gemini-3-flash-preview
+GUNICORN_TIMEOUT=240
+GUNICORN_WORKERS=2
 ```
 
 ## OCR con Gemini

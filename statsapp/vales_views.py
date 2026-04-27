@@ -147,6 +147,11 @@ def ocr_procesar(request):
         result = process_ocr_uploads(uploads)
     except RuntimeError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    except (TypeError, ValueError) as exc:
+        return Response(
+            {'detail': f'No se pudo interpretar la respuesta del OCR: {exc}'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
     enriched = []
     for idx, vale in enumerate(result.get('vales') or [], start=1):
