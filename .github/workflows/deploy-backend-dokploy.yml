@@ -71,7 +71,11 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$VPS_DOKPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$VPS_DOKPLOY_HOST" >> ~/.ssh/known_hosts
+          for attempt in 1 2 3; do
+            ssh-keyscan -T 20 -H "$VPS_DOKPLOY_HOST" >> ~/.ssh/known_hosts && break
+            test "$attempt" = "3" && exit 1
+            sleep 2
+          done
 
       - name: Trigger Dokploy deploy
         env:
