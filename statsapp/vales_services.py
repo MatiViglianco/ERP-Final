@@ -1235,6 +1235,9 @@ def _gemini_ocr_process(uploads):
         'generationConfig': {
             'responseMimeType': 'application/json',
             'responseJsonSchema': _ocr_response_schema(),
+            'thinkingConfig': {
+                'thinkingBudget': safe_int(os.environ.get('GEMINI_THINKING_BUDGET', 0), 0),
+            },
         },
     }
     headers = {'x-goog-api-key': api_key}

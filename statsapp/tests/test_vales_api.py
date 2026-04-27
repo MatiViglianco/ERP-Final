@@ -534,6 +534,8 @@ class ValesApiTests(APITestCase):
         self.assertEqual(response.data['vales'][0]['importe'], 12345.0)
         self.assertEqual(response.data['vales'][0]['source_index'], 0)
         self.assertEqual(response.data['vales'][0]['bbox'], {'x': 0.12, 'y': 0.44, 'w': 0.7, 'h': 0.04})
+        gemini_payload = http_json_mock.call_args.args[1]
+        self.assertEqual(gemini_payload['generationConfig']['thinkingConfig']['thinkingBudget'], 0)
 
     @mock.patch.dict(os.environ, {
         'OCR_PROVIDER': 'gemini',
