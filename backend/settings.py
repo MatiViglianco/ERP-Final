@@ -23,29 +23,45 @@ def load_local_env_file(path):
 load_local_env_file(BASE_DIR / ".env")
 load_local_env_file(BASE_DIR / "backend" / ".env")
 
+
+def parse_csv_setting(value):
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def merge_csv_setting(env_name, defaults):
+    values = []
+    for item in [*defaults, *parse_csv_setting(os.environ.get(env_name, ""))]:
+        if item not in values:
+            values.append(item)
+    return values
+
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
 # Producción por defecto; habilita DEBUG sólo si DJANGO_DEBUG=true está seteado.
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
-_default_allowed_hosts = ",".join([
+_default_allowed_hosts = [
     "localhost",
     "127.0.0.1",
     "api.mativiglianco.cloud",
     "vales.mativiglianco.cloud",
     "31.97.86.142",
-])
-ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts).split(",") if host.strip()]
-_default_cors = ",".join([
+]
+ALLOWED_HOSTS = merge_csv_setting("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts)
+_default_cors = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "https://api.mativiglianco.cloud",
     "https://vales.mativiglianco.cloud",
     "https://mativiglianco.github.io",
-])
-CORS_ALLOWED_ORIGINS = [origin for origin in os.environ.get("CORS_ALLOWED_ORIGINS", _default_cors).split(",") if origin]
-_default_csrf = ",".join([
+]
+CORS_ALLOWED_ORIGINS = merge_csv_setting("CORS_ALLOWED_ORIGINS", _default_cors)
+_default_csrf = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "https://api.mativiglianco.cloud",
     "https://vales.mativiglianco.cloud",
     "https://mativiglianco.github.io",
-])
-CSRF_TRUSTED_ORIGINS = [origin for origin in os.environ.get("CSRF_TRUSTED_ORIGINS", _default_csrf).split(",") if origin]
+]
+CSRF_TRUSTED_ORIGINS = merge_csv_setting("CSRF_TRUSTED_ORIGINS", _default_csrf)
 
 INSTALLED_APPS = [
     'django.contrib.admin',
