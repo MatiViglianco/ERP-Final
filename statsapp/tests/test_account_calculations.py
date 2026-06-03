@@ -1,18 +1,18 @@
+from datetime import date, datetime
 from decimal import Decimal
-from datetime import datetime, date
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from .models import AccountClient, AccountTransaction
-from .views import (
+from statsapp.models import AccountClient, AccountTransaction
+from statsapp.views import (
     _normalize_account_tx_status,
     _parse_decimal,
     _recalc_account_totals,
-    account_clients_stats,
     account_client_view,
+    account_clients_stats,
 )
 
 

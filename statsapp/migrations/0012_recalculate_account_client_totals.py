@@ -44,7 +44,7 @@ def recalculate_account_client_totals(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('statsapp', '0010_expenses'),
+        ('statsapp', '0011_accountclientalias_valeimportbatch_valeimportitem_and_more'),
     ]
 
     operations = [
