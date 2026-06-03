@@ -26,7 +26,14 @@ load_local_env_file(BASE_DIR / "backend" / ".env")
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
 # Producción por defecto; habilita DEBUG sólo si DJANGO_DEBUG=true está seteado.
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
-ALLOWED_HOSTS = [host for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "api.mativiglianco.cloud").split(",") if host]
+_default_allowed_hosts = ",".join([
+    "localhost",
+    "127.0.0.1",
+    "api.mativiglianco.cloud",
+    "vales.mativiglianco.cloud",
+    "31.97.86.142",
+])
+ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts).split(",") if host.strip()]
 _default_cors = ",".join([
     "https://api.mativiglianco.cloud",
     "https://vales.mativiglianco.cloud",
@@ -130,6 +137,13 @@ CORS_ALLOW_CREDENTIALS = True
 
 JWT_REFRESH_COOKIE_NAME = 'refresh_token'
 JWT_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Keep imports bounded. Current account exports are allowed to be large, but not unbounded.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE", 50 * 1024 * 1024))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DJANGO_FILE_UPLOAD_MAX_MEMORY_SIZE", 50 * 1024 * 1024))
 
 # Custom auth/session settings
 # Si quieres deshabilitar el cierre por inactividad, deja este valor en None.

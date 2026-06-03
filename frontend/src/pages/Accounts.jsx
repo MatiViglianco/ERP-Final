@@ -512,9 +512,8 @@ export default function AccountsPage() {
       .map((tx) => {
         const dateObj = tx.date ? toLocalDate(tx.date) : null
         const date = dateObj ? dateObj.toLocaleDateString('es-AR') : 'Sin fecha'
-        const desc = tx.description && tx.description.trim() ? tx.description : 'Gasto de'
         const remaining = formatCurrency(getRemainingValue(tx))
-        return `• ${date} - ${desc}: ${remaining}`
+        return `• ${date}: ${remaining}`
       })
       .join('\n')
     const total = pending.reduce((acc, tx) => acc + getRemainingValue(tx), 0)

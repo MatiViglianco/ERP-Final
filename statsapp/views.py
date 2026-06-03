@@ -5,7 +5,7 @@ from uuid import uuid4
 from collections import OrderedDict, defaultdict
 from django.db import transaction as db_transaction
 from django.db.models import Sum, Count, Q, Min, Max, F, DecimalField, ExpressionWrapper, Case, When, Value
-from django.db.models.functions import Coalesce, ExtractYear, ExtractMonth
+from django.db.models.functions import Coalesce, ExtractYear, ExtractMonth, TruncDate
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -1124,7 +1124,36 @@ def _parse_decimal(value):
     try:
         return Decimal(str(value))
     except Exception:
-        return Decimal('0')
+        return Decimal(str(_to_float(value)))
+
+
+def _normalize_account_tx_status(value, *, original_amount=None, paid_amount=None):
+    raw = (value or '').strip().lower()
+    aliases = {
+        'active': AccountTransaction.Status.ACTIVE,
+        'activo': AccountTransaction.Status.ACTIVE,
+        'activa': AccountTransaction.Status.ACTIVE,
+        'partial': AccountTransaction.Status.PARTIAL,
+        'parcial': AccountTransaction.Status.PARTIAL,
+        'overdue': AccountTransaction.Status.OVERDUE,
+        'vencido': AccountTransaction.Status.OVERDUE,
+        'vencida': AccountTransaction.Status.OVERDUE,
+        'paid': AccountTransaction.Status.PAID,
+        'pagado': AccountTransaction.Status.PAID,
+        'pagada': AccountTransaction.Status.PAID,
+    }
+    status_value = aliases.get(raw, AccountTransaction.Status.ACTIVE)
+
+    original = original_amount if original_amount is not None else Decimal('0')
+    paid = paid_amount if paid_amount is not None else Decimal('0')
+    remaining = original - paid
+    if original > Decimal('0') and remaining <= Decimal('0'):
+        return AccountTransaction.Status.PAID
+    if paid > Decimal('0') and remaining > Decimal('0') and status_value == AccountTransaction.Status.ACTIVE:
+        return AccountTransaction.Status.PARTIAL
+    if status_value == AccountTransaction.Status.PAID and remaining > Decimal('0'):
+        return AccountTransaction.Status.PARTIAL if paid > Decimal('0') else AccountTransaction.Status.ACTIVE
+    return status_value
 
 
 def _recalc_account_totals(client_ids=None):
@@ -1145,8 +1174,8 @@ def _recalc_account_totals(client_ids=None):
                 output_field=DecimalField(max_digits=14, decimal_places=2),
             )
         ),
-        overdue=Count('id', filter=Q(status=AccountTransaction.Status.OVERDUE)),
-        partial=Count('id', filter=Q(status=AccountTransaction.Status.PARTIAL)),
+        overdue=Count('id', filter=Q(status=AccountTransaction.Status.OVERDUE, original_amount__gt=F('paid_amount'))),
+        partial=Count('id', filter=Q(status=AccountTransaction.Status.PARTIAL, original_amount__gt=F('paid_amount'))),
     )
 
     updated_ids = set()
@@ -1271,7 +1300,7 @@ def upload_account_clients(request):
             AccountClient.objects.bulk_create(to_create, batch_size=1000)
             touched_clients.update(client.id for client in to_create)
         if to_update:
-            AccountClient.objects.bulk_update(to_update, ['first_name', 'last_name', 'source_created_at'], batch_size=1000)
+            AccountClient.objects.bulk_update(to_update, ['first_name', 'last_name', 'source_created_at', 'phone'], batch_size=1000)
 
         client_map = {
             client.external_id: client
@@ -1298,6 +1327,7 @@ def upload_account_clients(request):
 
         tx_to_create = []
         tx_to_update = []
+        clients_to_recalc = set(touched_clients)
         touched_clients = set()
         for tx in transactions:
             ext_id = str(tx.get('id') or '').strip()
@@ -1309,13 +1339,15 @@ def upload_account_clients(request):
                 continue
             touched_clients.add(client.id)
             description = (tx.get('descripcion') or '').strip()
-            status_value = (tx.get('estado') or AccountTransaction.Status.ACTIVE).lower()
-            if status_value not in AccountTransaction.Status.values:
-                status_value = AccountTransaction.Status.ACTIVE
             parsed_date = _parse_client_date(tx.get('fecha'))
             created_at = _parse_client_datetime(tx.get('createdAt'))
             original_amount = _parse_decimal(tx.get('monto'))
             paid_amount = _parse_decimal(tx.get('montoPagado'))
+            status_value = _normalize_account_tx_status(
+                tx.get('estado'),
+                original_amount=original_amount,
+                paid_amount=paid_amount,
+            )
             payments = tx.get('pagos') if isinstance(tx.get('pagos'), list) else []
 
             if ext_id in existing_tx_map:
@@ -1369,6 +1401,7 @@ def upload_account_clients(request):
                 batch_size=500,
             )
 
+        touched_clients.update(clients_to_recalc)
         if touched_clients:
             _recalc_account_totals(list(touched_clients))
 
@@ -1476,18 +1509,23 @@ def account_clients_stats(request):
     year = _safe_int(request.query_params.get('year'), None)
     month = _safe_int(request.query_params.get('month'), None)
     day = _safe_int(request.query_params.get('day'), None)
-    qs = AccountTransaction.objects.filter(date__isnull=False).select_related('client')
+    qs = (
+        AccountTransaction.objects
+        .select_related('client')
+        .annotate(generated_date=Coalesce(TruncDate('created_at'), 'date'))
+        .filter(generated_date__isnull=False)
+    )
     if start:
-        qs = qs.filter(date__gte=start)
+        qs = qs.filter(generated_date__gte=start)
     if end:
-        qs = qs.filter(date__lte=end)
+        qs = qs.filter(generated_date__lte=end)
     if year:
-        qs = qs.filter(date__year=year)
+        qs = qs.filter(generated_date__year=year)
     if month:
-        qs = qs.filter(date__month=month)
+        qs = qs.filter(generated_date__month=month)
     if day:
-        qs = qs.filter(date__day=day)
-    qs = qs.order_by('-date', '-created_at')
+        qs = qs.filter(generated_date__day=day)
+    qs = qs.order_by('-generated_date', '-created_at')
 
     months = OrderedDict()
 
@@ -1495,10 +1533,11 @@ def account_clients_stats(request):
     client_totals = defaultdict(lambda: Decimal('0'))
 
     for tx in qs:
-        if not tx.date:
+        stat_date = tx.generated_date
+        if not stat_date:
             continue
-        month_key = tx.date.strftime('%Y-%m')
-        month_label = _format_spanish_month(tx.date)
+        month_key = stat_date.strftime('%Y-%m')
+        month_label = _format_spanish_month(stat_date)
         month_entry = months.setdefault(month_key, {
             'month': month_key,
             'month_label': month_label,
@@ -1511,8 +1550,8 @@ def account_clients_stats(request):
         month_entry['totals']['paid'] += tx.paid_amount or Decimal('0')
         month_entry['totals']['remaining'] += remaining
 
-        day_key = tx.date.strftime('%Y-%m-%d')
-        day_label = _format_spanish_day(tx.date)
+        day_key = stat_date.strftime('%Y-%m-%d')
+        day_label = _format_spanish_day(stat_date)
         day_entry = month_entry['days'].setdefault(day_key, {
             'date': day_key,
             'label': day_label,
@@ -1531,6 +1570,8 @@ def account_clients_stats(request):
             'paid': float(tx.paid_amount or 0),
             'remaining': float(remaining),
             'status': tx.status,
+            'transaction_date': tx.date.isoformat() if tx.date else None,
+            'generated_date': stat_date.isoformat(),
         })
 
         year_totals['original'] += tx.original_amount or Decimal('0')
@@ -1589,8 +1630,17 @@ def account_client_view(request, pk):
         totals = qs.aggregate(
             original=Coalesce(Sum('original_amount'), Decimal('0')),
             paid=Coalesce(Sum('paid_amount'), Decimal('0')),
+            remaining=Coalesce(Sum(
+                Case(
+                    When(original_amount__gt=F('paid_amount'), then=ExpressionWrapper(
+                        F('original_amount') - F('paid_amount'),
+                        output_field=DecimalField(max_digits=14, decimal_places=2),
+                    )),
+                    default=Value(Decimal('0')),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                )
+            ), Decimal('0')),
         )
-        remaining_total = totals['original'] - totals['paid']
 
         return Response({
             'client': _serialize_account_client(client),
@@ -1601,7 +1651,7 @@ def account_client_view(request, pk):
             'totals': {
                 'original': float(totals['original']),
                 'paid': float(totals['paid']),
-                'remaining': float(remaining_total),
+                'remaining': float(totals['remaining']),
             },
         })
 
@@ -1748,9 +1798,7 @@ def account_transaction_create(request, pk):
 
     tx_date = _parse_client_date(data.get('date')) or date.today()
     description = (data.get('description') or '').strip()
-    status_value = (data.get('status') or AccountTransaction.Status.ACTIVE).lower()
-    if status_value not in AccountTransaction.Status.values:
-        status_value = AccountTransaction.Status.ACTIVE
+    status_value = _normalize_account_tx_status(data.get('status'))
     if status_value == AccountTransaction.Status.ACTIVE:
         today = date.today()
         start_of_month = date(today.year, today.month, 1)

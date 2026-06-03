@@ -69,8 +69,11 @@ export function AuthProvider({ children }) {
   const [hasRefreshFlag, setHasRefreshFlag] = useState(() => readRefreshFlag())
   const inactivityTimer = useRef(null)
   const manualLogoutRef = useRef(false)
+  const accessTokenRef = useRef(accessToken)
+  const refreshPromiseRef = useRef(null)
 
   const setAccessToken = useCallback((token) => {
+    accessTokenRef.current = token
     setAccessTokenState(token)
     persistToken(token)
   }, [])
@@ -127,38 +130,48 @@ export function AuthProvider({ children }) {
   }, [])
 
   const refreshAccess = useCallback(async () => {
-    try {
-      const resp = await fetch(`${API_BASE}/auth/refresh/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({}),
-      })
-      if (!resp.ok) {
-        return false
-      }
-      const data = await resp.json()
-      const token = data.access
-      if (!token) {
-        return false
-      }
-      setAccessToken(token)
-      setRefreshFlag(true)
-      resetInactivityTimeout(token)
-      if (data.user) {
-        setUser(data.user)
-      } else {
-        const profile = await fetchProfile(token)
-        if (profile) {
-          setUser(profile)
-        }
-      }
-      return true
-    } catch (err) {
-      console.error(err)
-      return false
+    if (refreshPromiseRef.current) {
+      return refreshPromiseRef.current
     }
-  }, [fetchProfile, resetInactivityTimeout, setRefreshFlag])
+
+    refreshPromiseRef.current = (async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/auth/refresh/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({}),
+        })
+        if (!resp.ok) {
+          return null
+        }
+        const data = await resp.json()
+        const token = data.access
+        if (!token) {
+          return null
+        }
+        setAccessToken(token)
+        setRefreshFlag(true)
+        resetInactivityTimeout(token)
+        if (data.user) {
+          setUser(data.user)
+        } else {
+          const profile = await fetchProfile(token)
+          if (profile) {
+            setUser(profile)
+          }
+        }
+        return token
+      } catch (err) {
+        console.error(err)
+        return null
+      } finally {
+        refreshPromiseRef.current = null
+      }
+    })()
+
+    return refreshPromiseRef.current
+  }, [fetchProfile, resetInactivityTimeout, setAccessToken, setRefreshFlag, setUser])
 
   useEffect(() => {
     let mounted = true
@@ -238,7 +251,7 @@ export function AuthProvider({ children }) {
   }, [resetInactivityTimeout, setAccessToken, setUser, setRefreshFlag])
 
   const authFetch = useCallback(async (url, options = {}, retry = true) => {
-    const headers = buildAuthHeader(accessToken, options.headers)
+    const headers = buildAuthHeader(accessTokenRef.current, options.headers)
     const response = await fetch(url, { ...options, headers, credentials: 'include' })
     resetInactivityTimeout()
     if (response.status === 401 && retry) {
@@ -246,15 +259,18 @@ export function AuthProvider({ children }) {
         await logout()
         return response
       }
-      const refreshed = await refreshAccess()
-      if (!refreshed) {
+      const refreshedToken = await refreshAccess()
+      if (!refreshedToken) {
         await logout()
         return response
       }
-      return authFetch(url, options, false)
+      const retryHeaders = buildAuthHeader(refreshedToken, options.headers)
+      const retryResponse = await fetch(url, { ...options, headers: retryHeaders, credentials: 'include' })
+      resetInactivityTimeout()
+      return retryResponse
     }
     return response
-  }, [accessToken, refreshAccess, logout, hasRefreshFlag, resetInactivityTimeout])
+  }, [refreshAccess, logout, hasRefreshFlag, resetInactivityTimeout])
 
   const value = useMemo(() => ({
     user,

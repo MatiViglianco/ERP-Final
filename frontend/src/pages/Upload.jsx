@@ -171,6 +171,7 @@ export default function UploadPage() {
         throw new Error(data?.detail || 'No se pudo procesar el archivo')
       }
       setAccountError('')
+      navigate('/cuentas')
     } catch (err) {
       setAccountError(err.message)
     } finally {

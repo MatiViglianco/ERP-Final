@@ -1,8 +1,9 @@
 ﻿import csv
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from io import TextIOWrapper, StringIO
 
 import xlrd
+from openpyxl import load_workbook
 import re
 
 
@@ -17,20 +18,33 @@ UNIT_HINTS = {'UNI', 'UNIDAD', 'UNIDADES', 'UND', 'U'}
 def _to_float(val):
     if val is None:
         return 0.0
-    s = str(val).strip()
+    s = str(val).strip().replace('\xa0', ' ')
     if s == '':
         return 0.0
     negative = False
     if s.startswith('(') and s.endswith(')'):
         negative = True
         s = s[1:-1]
+    if '-' in s:
+        negative = True
+    s = re.sub(r'[^\d,.\-]', '', s).replace('-', '')
+    if not s:
+        return 0.0
     # Normalise thousand/decimal separators
-    if ',' in s:
-        # assume dot is thousand separator when comma present
+    if ',' in s and '.' in s:
+        if s.rfind(',') > s.rfind('.'):
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '')
+    elif ',' in s:
+        s = s.replace('.', '').replace(',', '.')
+    elif s.count('.') > 1:
         s = s.replace('.', '')
-        s = s.replace(',', '.')
+    elif '.' in s:
+        integer, fraction = s.rsplit('.', 1)
+        if len(fraction) == 3 and integer.isdigit():
+            s = integer + fraction
     else:
-        # remove thousand separators (spaces)
         s = s.replace(' ', '')
     try:
         value = float(s)
@@ -168,14 +182,22 @@ def _read_text_file(uploaded_file, encodings=None):
 def _parse_date(value):
     if isinstance(value, datetime):
         return value.date()
-    value = (value or '').strip()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)) and value > 20000:
+        return (datetime(1899, 12, 30) + timedelta(days=float(value))).date()
+    value = str(value or '').strip()
     if not value:
         return None
-    for fmt in ('%d/%m/%Y', '%Y-%m-%d'):
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
+    candidates = [value]
+    if ' ' in value:
+        candidates.append(value.split()[0])
+    for candidate in candidates:
+        for fmt in ('%d/%m/%Y', '%d/%m/%y', '%Y-%m-%d', '%d-%m-%Y', '%d-%m-%y', '%Y/%m/%d'):
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     raise ValueError(f'Fecha invalida: {value}')
 
 
@@ -229,6 +251,70 @@ def parse_santander_csv(uploaded_file):
     return rows
 
 
+def _cell_to_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, datetime):
+        return value.date().strftime('%d/%m/%Y')
+    if isinstance(value, date):
+        return value.strftime('%d/%m/%Y')
+    return str(value).strip()
+
+
+def detect_columns(values):
+    mapping = {}
+    for idx, value in enumerate(values):
+        lower = str(value or '').strip().lower()
+        if 'fecha' in lower and 'hora' not in lower:
+            mapping['date'] = idx
+        elif 'concepto' in lower or 'concept' in lower:
+            mapping['concept'] = idx
+        elif 'descripcion' in lower or 'descripción' in lower or 'detalle' in lower:
+            mapping['description'] = idx
+        elif any(token in lower for token in ('monto', 'importe')):
+            mapping['amount'] = idx
+    return mapping if {'date', 'concept', 'amount'}.issubset(mapping) else None
+
+
+def _parse_bancon_xlsx(uploaded_file):
+    uploaded_file.seek(0)
+    workbook = load_workbook(uploaded_file, read_only=True, data_only=True)
+    sheet = workbook.active
+    header = None
+    rows = []
+
+    for raw in sheet.iter_rows(values_only=True):
+        values = [_cell_to_text(cell) for cell in raw]
+        if not values or all(value == '' for value in values):
+            continue
+        detected = detect_columns(values)
+        if detected:
+            header = detected
+            continue
+        if not header:
+            continue
+
+        def _value(col_name):
+            idx = header.get(col_name)
+            if idx is None or idx >= len(raw):
+                return ''
+            return raw[idx]
+
+        try:
+            parsed_date = _parse_date(_value('date'))
+        except ValueError:
+            continue
+        concept = _clean_concept(_cell_to_text(_value('concept')))
+        description = _clean_concept(_cell_to_text(_value('description')))
+        rows.append({
+            'date': parsed_date,
+            'concept': concept or description,
+            'description': description,
+            'amount': _to_float(_value('amount')),
+        })
+    return rows
+
+
 def parse_bancon_file(uploaded_file):
     name = (getattr(uploaded_file, 'name', '') or '').lower()
     if name.endswith('.csv'):
@@ -236,20 +322,6 @@ def parse_bancon_file(uploaded_file):
         reader = csv.reader(StringIO(text), delimiter=';')
         rows = []
         col_map = None
-
-        def detect_columns(values):
-            mapping = {}
-            for idx, value in enumerate(values):
-                lower = value.lower()
-                if 'fecha' in lower and 'hora' not in lower:
-                    mapping['date'] = idx
-                elif 'concepto' in lower or 'concept' in lower:
-                    mapping['concept'] = idx
-                elif 'descripcion' in lower or 'detalle' in lower:
-                    mapping['description'] = idx
-                elif any(token in lower for token in ('monto', 'importe')):
-                    mapping['amount'] = idx
-            return mapping if {'date', 'concept', 'amount'}.issubset(mapping) else None
 
         for raw in reader:
             normalized = [cell.strip() for cell in raw]
@@ -291,26 +363,29 @@ def parse_bancon_file(uploaded_file):
             raise ValueError('El archivo de Bancon no contiene movimientos')
         return rows
 
+    if name.endswith('.xlsx'):
+        rows = _parse_bancon_xlsx(uploaded_file)
+        if not rows:
+            raise ValueError('No se obtuvieron movimientos del XLSX de Bancon')
+        return rows
+
     uploaded_file.seek(0)
     book = xlrd.open_workbook(file_contents=uploaded_file.read())
     sheet = book.sheet_by_index(0)
-    header = {}
-    for col in range(sheet.ncols):
-        value = str(sheet.cell_value(0, col)).strip().lower()
-        if 'fecha' in value:
-            header['date'] = col
-        elif 'concepto' in value:
-            header['concept'] = col
-        elif 'descripcion' in value or 'detalle' in value:
-            header['description'] = col
-        elif any(token in value for token in ('monto', 'importe')):
-            header['amount'] = col
-    required = {'date', 'concept', 'amount'}
-    if not required.issubset(header):
+    header = None
+    data_start = 1
+    for row_idx in range(sheet.nrows):
+        values = [str(sheet.cell_value(row_idx, col)).strip() for col in range(sheet.ncols)]
+        detected = detect_columns(values)
+        if detected:
+            header = detected
+            data_start = row_idx + 1
+            break
+    if not header:
         raise ValueError('El XLS de Bancon no tiene los encabezados esperados')
 
     rows = []
-    for row_idx in range(1, sheet.nrows):
+    for row_idx in range(data_start, sheet.nrows):
         def _cell(col_name):
             col = header.get(col_name)
             if col is None:
