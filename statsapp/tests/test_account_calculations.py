@@ -11,8 +11,10 @@ from statsapp.views import (
     _normalize_account_tx_status,
     _parse_decimal,
     _recalc_account_totals,
+    account_client_pay,
     account_client_view,
     account_clients_stats,
+    account_transaction_delete,
 )
 
 
@@ -115,3 +117,65 @@ class AccountCalculationTests(TestCase):
         self.assertEqual(june_response.data['year_totals']['original'], 100.0)
         self.assertEqual(june_response.data['results'][0]['month'], '2026-06')
         self.assertEqual(june_response.data['results'][0]['days'][0]['date'], '2026-06-02')
+
+    def test_payment_response_includes_changed_transactions_and_totals(self):
+        client = AccountClient.objects.create(external_id='client-4', first_name='Test', last_name='Client')
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='pay-me',
+            original_amount=Decimal('100'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='keep-pending',
+            original_amount=Decimal('50'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        _recalc_account_totals([client.id])
+        request = APIRequestFactory().post(
+            f'/api/accounts/clients/{client.id}/pay/',
+            {'mode': 'selected', 'transaction_ids': ['pay-me']},
+            format='json',
+        )
+        force_authenticate(request, user=self.user)
+
+        response = account_client_pay(request, pk=client.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['client']['total_debt'], 50.0)
+        self.assertEqual(response.data['totals']['remaining'], 50.0)
+        self.assertEqual(len(response.data['transactions']), 1)
+        self.assertEqual(response.data['transactions'][0]['id'], 'pay-me')
+        self.assertEqual(response.data['transactions'][0]['remaining'], 0.0)
+        self.assertEqual(response.data['transactions'][0]['status'], AccountTransaction.Status.PAID)
+
+    def test_delete_transaction_response_includes_removed_id_client_and_totals(self):
+        client = AccountClient.objects.create(external_id='client-5', first_name='Test', last_name='Client')
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='delete-me',
+            original_amount=Decimal('100'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='keep-me',
+            original_amount=Decimal('25'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        _recalc_account_totals([client.id])
+        request = APIRequestFactory().delete('/api/accounts/transactions/delete-me/')
+        force_authenticate(request, user=self.user)
+
+        response = account_transaction_delete(request, external_id='delete-me')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['deleted_transaction_id'], 'delete-me')
+        self.assertEqual(response.data['client']['total_debt'], 25.0)
+        self.assertEqual(response.data['totals']['original'], 25.0)
+        self.assertEqual(response.data['totals']['remaining'], 25.0)

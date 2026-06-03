@@ -1501,6 +1501,29 @@ def _serialize_transactions(qs):
     return data
 
 
+def _account_transaction_totals(client):
+    qs = client.transactions.all()
+    totals = qs.aggregate(
+        original=Coalesce(Sum('original_amount'), Decimal('0')),
+        paid=Coalesce(Sum('paid_amount'), Decimal('0')),
+        remaining=Coalesce(Sum(
+            Case(
+                When(original_amount__gt=F('paid_amount'), then=ExpressionWrapper(
+                    F('original_amount') - F('paid_amount'),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                )),
+                default=Value(Decimal('0')),
+                output_field=DecimalField(max_digits=14, decimal_places=2),
+            )
+        ), Decimal('0')),
+    )
+    return {
+        'original': float(totals['original']),
+        'paid': float(totals['paid']),
+        'remaining': float(totals['remaining']),
+    }
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def account_clients_stats(request):
@@ -1621,26 +1644,11 @@ def account_client_view(request, pk):
     client = get_object_or_404(AccountClient, pk=pk)
 
     if request.method == 'GET':
-        limit = min(max(_safe_int(request.query_params.get('limit', 30), 30), 1), 500)
+        limit = min(max(_safe_int(request.query_params.get('limit', 30), 30), 1), 5000)
         offset = max(_safe_int(request.query_params.get('offset', 0), 0), 0)
         qs = client.transactions.order_by('-date', '-created_at', '-id')
         total = qs.count()
         page = qs[offset:offset + limit]
-
-        totals = qs.aggregate(
-            original=Coalesce(Sum('original_amount'), Decimal('0')),
-            paid=Coalesce(Sum('paid_amount'), Decimal('0')),
-            remaining=Coalesce(Sum(
-                Case(
-                    When(original_amount__gt=F('paid_amount'), then=ExpressionWrapper(
-                        F('original_amount') - F('paid_amount'),
-                        output_field=DecimalField(max_digits=14, decimal_places=2),
-                    )),
-                    default=Value(Decimal('0')),
-                    output_field=DecimalField(max_digits=14, decimal_places=2),
-                )
-            ), Decimal('0')),
-        )
 
         return Response({
             'client': _serialize_account_client(client),
@@ -1648,11 +1656,7 @@ def account_client_view(request, pk):
             'transactions_total': total,
             'limit': limit,
             'offset': offset,
-            'totals': {
-                'original': float(totals['original']),
-                'paid': float(totals['paid']),
-                'remaining': float(totals['remaining']),
-            },
+            'totals': _account_transaction_totals(client),
         })
 
     if request.method == 'PATCH':
@@ -1710,6 +1714,7 @@ def account_client_pay(request, pk):
     client = get_object_or_404(AccountClient, pk=pk)
     mode = (request.data.get('mode') or 'selected').lower()
     today = date.today()
+    changed_tx_ids = set()
 
     with db_transaction.atomic():
         if mode == 'selected':
@@ -1727,6 +1732,8 @@ def account_client_pay(request, pk):
                     if remaining <= Decimal('0'):
                         continue
                     paid = _apply_payment_to_tx(tx, amount_left, today)
+                    if paid > Decimal('0'):
+                        changed_tx_ids.add(tx.pk)
                     amount_left -= paid
                     if amount_left <= Decimal('0'):
                         break
@@ -1737,14 +1744,18 @@ def account_client_pay(request, pk):
                     remaining = tx.remaining_amount
                     if remaining <= Decimal('0'):
                         continue
-                    _apply_payment_to_tx(tx, remaining, today)
+                    paid = _apply_payment_to_tx(tx, remaining, today)
+                    if paid > Decimal('0'):
+                        changed_tx_ids.add(tx.pk)
 
         elif mode == 'full':
             txs = list(client.transactions.filter(original_amount__gt=F('paid_amount')))
             for tx in txs:
                 remaining = tx.remaining_amount
                 if remaining > Decimal('0'):
-                    _apply_payment_to_tx(tx, remaining, today)
+                    paid = _apply_payment_to_tx(tx, remaining, today)
+                    if paid > Decimal('0'):
+                        changed_tx_ids.add(tx.pk)
 
         elif mode == 'partial':
             amount = _parse_decimal(request.data.get('amount'))
@@ -1769,6 +1780,8 @@ def account_client_pay(request, pk):
             amount_left = amount
             for tx in pending:
                 paid = _apply_payment_to_tx(tx, amount_left, today)
+                if paid > Decimal('0'):
+                    changed_tx_ids.add(tx.pk)
                 amount_left -= paid
                 if amount_left <= Decimal('0'):
                     break
@@ -1780,9 +1793,15 @@ def account_client_pay(request, pk):
         _recalc_account_totals([client.id])
         client.refresh_from_db()
 
+    changed_transactions = []
+    if changed_tx_ids:
+        changed_transactions = AccountTransaction.objects.filter(pk__in=changed_tx_ids).order_by('-date', '-created_at', '-id')
+
     return Response({
         'detail': 'Pago registrado correctamente',
         'client': _serialize_account_client(client),
+        'transactions': _serialize_transactions(changed_transactions),
+        'totals': _account_transaction_totals(client),
     })
 
 
@@ -1828,6 +1847,7 @@ def account_transaction_create(request, pk):
         'detail': 'Movimiento registrado correctamente',
         'transaction': _serialize_transactions([new_tx])[0],
         'client': _serialize_account_client(client),
+        'totals': _account_transaction_totals(client),
     }, status=status.HTTP_201_CREATED)
 
 
@@ -1838,4 +1858,10 @@ def account_transaction_delete(request, external_id):
     client_id = tx.client_id
     tx.delete()
     _recalc_account_totals([client_id])
-    return Response(status=status.HTTP_204_NO_CONTENT)
+    client = AccountClient.objects.filter(pk=client_id).first()
+    return Response({
+        'detail': 'Movimiento eliminado correctamente',
+        'deleted_transaction_id': external_id,
+        'client': _serialize_account_client(client) if client else None,
+        'totals': _account_transaction_totals(client) if client else {'original': 0, 'paid': 0, 'remaining': 0},
+    })

@@ -77,7 +77,8 @@ const transactionStatusFilterMap = {
 }
 
 const CLIENT_PAGE_SIZE = 10
-const TX_PAGE_SIZE = 30
+const DEFAULT_TX_PAGE_SIZE = 50
+const TX_PAGE_SIZE_OPTIONS = [30, 50, 100]
 const TX_FETCH_LIMIT = 5000
 const COUNTRY_CODE_PREFIX = '+54'
 const STATS_MONTH_PAGE_SIZE = 12
@@ -116,6 +117,24 @@ const getRemainingValue = (tx) => {
   const paid = typeof tx.paid === 'number' ? tx.paid : 0
   return Math.max(0, original - paid)
 }
+
+const calculateTransactionTotals = (transactions) => transactions.reduce((acc, tx) => {
+  acc.original += Number(tx.original || 0)
+  acc.paid += Number(tx.paid || 0)
+  acc.remaining += getRemainingValue(tx)
+  return acc
+}, { original: 0, paid: 0, remaining: 0 })
+
+const transactionTimeValue = (dateStr) => {
+  const parsed = toLocalDate(dateStr)
+  return parsed ? parsed.getTime() : 0
+}
+
+const sortTransactionsDesc = (transactions) => [...transactions].sort((a, b) => {
+  const byDate = transactionTimeValue(b.date) - transactionTimeValue(a.date)
+  if (byDate !== 0) return byDate
+  return String(b.id || '').localeCompare(String(a.id || ''))
+})
 
 function formatCurrency(value) {
   return `$ ${Number(value || 0).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
@@ -166,6 +185,7 @@ export default function AccountsPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
   const [txPage, setTxPage] = useState(0)
+  const [txPageSize, setTxPageSize] = useState(DEFAULT_TX_PAGE_SIZE)
 
   const [selectedTransactions, setSelectedTransactions] = useState(new Set())
   const [actionLoading, setActionLoading] = useState(false)
@@ -243,7 +263,10 @@ export default function AccountsPage() {
       const resp = await authFetch(`${API_ACCOUNT_DETAIL(selectedId)}?${params.toString()}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo obtener el detalle')
-      setDetail(data)
+      setDetail({
+        ...data,
+        transactions: sortTransactionsDesc(data.transactions || []),
+      })
       setSelectedTransactions(new Set())
     } catch (err) {
       setDetailError(err.message)
@@ -268,6 +291,48 @@ export default function AccountsPage() {
   const selectedClient = detail?.client
   const transactions = detail?.transactions || []
   const totals = detail?.totals || { original: 0, paid: 0, remaining: 0 }
+  const updateClientSnapshot = useCallback((client) => {
+    if (!client?.id) return
+    setClients((prev) => prev.map((item) => (item.id === client.id ? { ...item, ...client } : item)))
+    setDetail((prev) => {
+      if (!prev?.client || prev.client.id !== client.id) return prev
+      return { ...prev, client: { ...prev.client, ...client } }
+    })
+  }, [])
+
+  const applyDetailPatch = useCallback(({ client, totals: nextTotals, transactions: changedTransactions = [], removeIds = [] }) => {
+    if (client) updateClientSnapshot(client)
+    const removed = new Set(removeIds)
+    setDetail((prev) => {
+      if (!prev) return prev
+      const byId = new Map((prev.transactions || []).map((tx) => [tx.id, tx]))
+      removed.forEach((id) => byId.delete(id))
+      changedTransactions.forEach((tx) => {
+        if (tx?.id) byId.set(tx.id, { ...(byId.get(tx.id) || {}), ...tx })
+      })
+      const nextTransactions = sortTransactionsDesc(Array.from(byId.values()))
+      const transactionDelta = changedTransactions.filter((tx) => tx?.id && !(prev.transactions || []).some((item) => item.id === tx.id)).length - removed.size
+      return {
+        ...prev,
+        client: client ? { ...(prev.client || {}), ...client } : prev.client,
+        transactions: nextTransactions,
+        transactions_total: Math.max(0, Number(prev.transactions_total || prev.transactions?.length || 0) + transactionDelta),
+        totals: nextTotals || calculateTransactionTotals(nextTransactions),
+      }
+    })
+    if (removed.size || changedTransactions.length) {
+      const settledIds = changedTransactions.filter((tx) => getRemainingValue(tx) <= 0).map((tx) => tx.id)
+      const idsToClear = new Set([...removeIds, ...settledIds])
+      if (idsToClear.size) {
+        setSelectedTransactions((prev) => {
+          const next = new Set(prev)
+          idsToClear.forEach((id) => next.delete(id))
+          return next
+        })
+      }
+    }
+  }, [updateClientSnapshot])
+
   const selectableTransactionIds = useMemo(
     () => transactions.filter((tx) => getRemainingValue(tx) > 0).map((tx) => tx.id),
     [transactions],
@@ -296,11 +361,31 @@ export default function AccountsPage() {
   }, [transactions, statusFilter])
 
   const clientTotalPages = Math.max(1, Math.ceil(clientCount / CLIENT_PAGE_SIZE))
-  const txTotalPages = Math.max(1, Math.ceil(filteredTransactions.length / TX_PAGE_SIZE))
+  const txTotalPages = Math.max(1, Math.ceil(filteredTransactions.length / txPageSize))
   const paginatedTransactions = useMemo(
-    () => filteredTransactions.slice(txPage * TX_PAGE_SIZE, txPage * TX_PAGE_SIZE + TX_PAGE_SIZE),
-    [filteredTransactions, txPage],
+    () => filteredTransactions.slice(txPage * txPageSize, txPage * txPageSize + txPageSize),
+    [filteredTransactions, txPage, txPageSize],
   )
+
+  const monthSelectionState = useMemo(() => {
+    const months = new Map()
+    filteredTransactions.forEach((tx) => {
+      const dateObj = tx.date ? toLocalDate(tx.date) : null
+      const key = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}` : 'sin-fecha'
+      const entry = months.get(key) || { selectableIds: [], total: 0 }
+      const remaining = getRemainingValue(tx)
+      entry.total += remaining
+      if (remaining > 0) entry.selectableIds.push(tx.id)
+      months.set(key, entry)
+    })
+    return months
+  }, [filteredTransactions])
+
+  useEffect(() => {
+    if (txPage > txTotalPages - 1) {
+      setTxPage(txTotalPages - 1)
+    }
+  }, [txPage, txTotalPages])
 
   const handleSelectClient = (id) => {
     setSelectedId(id)
@@ -315,6 +400,11 @@ export default function AccountsPage() {
 
   const handleStatusChip = (value) => {
     setStatusFilter(value)
+  }
+
+  const handleTxPageSizeChange = (e) => {
+    setTxPageSize(Number(e.target.value) || DEFAULT_TX_PAGE_SIZE)
+    setTxPage(0)
   }
 
   const handleSearchChange = (e) => {
@@ -419,8 +509,7 @@ export default function AccountsPage() {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo actualizar el cliente')
       setEditDialogOpen(false)
-      fetchClients()
-      fetchDetail()
+      updateClientSnapshot(data)
     } catch (err) {
       setActionError(err.message)
     } finally {
@@ -461,9 +550,17 @@ export default function AccountsPage() {
       })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) throw new Error(data.detail || 'No se pudo registrar el pago')
-      setSelectedTransactions(new Set())
-      fetchClients()
-      fetchDetail()
+      if (data.client || data.transactions || data.totals) {
+        applyDetailPatch({
+          client: data.client,
+          totals: data.totals,
+          transactions: data.transactions || [],
+        })
+      } else {
+        setSelectedTransactions(new Set())
+        fetchClients()
+        fetchDetail()
+      }
     } catch (err) {
       setActionError(err.message)
     } finally {
@@ -559,6 +656,7 @@ const handleWhatsappMessage = async (client) => {
     paginatedTransactions.forEach((tx) => {
       const dateObj = tx.date ? toLocalDate(tx.date) : null
       const key = dateObj ? `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}` : 'sin-fecha'
+      const monthState = monthSelectionState.get(key) || { selectableIds: [], total: 0 }
       if (!currentGroup || currentKey !== key) {
         currentKey = key
         currentGroup = {
@@ -566,21 +664,16 @@ const handleWhatsappMessage = async (client) => {
           label: dateObj
             ? dateObj.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
             : 'Sin fecha',
-          total: 0,
+          total: monthState.total,
           transactions: [],
-          selectableIds: [],
+          selectableIds: monthState.selectableIds,
         }
         groups.push(currentGroup)
       }
       currentGroup.transactions.push(tx)
-      const remaining = getRemainingValue(tx)
-      currentGroup.total += remaining
-      if (remaining > 0) {
-        currentGroup.selectableIds.push(tx.id)
-      }
     })
     return groups
-  }, [paginatedTransactions])
+  }, [monthSelectionState, paginatedTransactions])
 
   const confirmPaySelected = () => {
     const payload = { mode: 'selected', transaction_ids: Array.from(selectedTransactions) }
@@ -652,8 +745,16 @@ const handleWhatsappMessage = async (client) => {
         amount: '',
         description: '',
       }))
-      fetchClients()
-      fetchDetail()
+      if (data.client || data.transaction || data.totals) {
+        applyDetailPatch({
+          client: data.client,
+          totals: data.totals,
+          transactions: data.transaction ? [data.transaction] : [],
+        })
+      } else {
+        fetchClients()
+        fetchDetail()
+      }
     } catch (err) {
       setNewExpenseError(err.message)
     } finally {
@@ -668,17 +769,25 @@ const handleWhatsappMessage = async (client) => {
     setActionLoading(true)
     try {
       const resp = await authFetch(API_ACCOUNT_TX_DELETE(txId), { method: 'DELETE' })
+      const responseData = await resp.json().catch(() => ({}))
       if (resp.status !== 204 && !resp.ok) {
-        const data = await resp.json().catch(() => ({}))
-        throw new Error(data.detail || 'No se pudo eliminar la transacción')
+        throw new Error(responseData.detail || 'No se pudo eliminar la transacción')
       }
       setSelectedTransactions((prev) => {
         const next = new Set(prev)
         next.delete(txId)
         return next
       })
-      fetchClients()
-      fetchDetail()
+      if (responseData.client || responseData.totals || responseData.deleted_transaction_id) {
+        applyDetailPatch({
+          client: responseData.client,
+          totals: responseData.totals,
+          removeIds: [responseData.deleted_transaction_id || txId],
+        })
+      } else {
+        fetchClients()
+        fetchDetail()
+      }
     } catch (err) {
       setActionError(err.message)
     } finally {
@@ -941,6 +1050,34 @@ const handleWhatsappMessage = async (client) => {
                 />
               ))}
             </Stack>
+
+            {selectedClient && (
+              <Stack
+                direction={{ xs: 'column', sm: 'row' }}
+                spacing={1}
+                alignItems={{ xs: 'stretch', sm: 'center' }}
+                justifyContent="space-between"
+              >
+                <Typography variant="body2" color="text.secondary">
+                  {filteredTransactions.length} movimientos
+                </Typography>
+                <TextField
+                  select
+                  size="small"
+                  label="Por pagina"
+                  value={txPageSize}
+                  onChange={handleTxPageSizeChange}
+                  SelectProps={{ native: true }}
+                  sx={{ width: { xs: '100%', sm: 170 } }}
+                >
+                  {TX_PAGE_SIZE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option} por pagina
+                    </option>
+                  ))}
+                </TextField>
+              </Stack>
+            )}
 
             {actionError && <Alert severity="error">{actionError}</Alert>}
             {detailError && <Alert severity="error">{detailError}</Alert>}
