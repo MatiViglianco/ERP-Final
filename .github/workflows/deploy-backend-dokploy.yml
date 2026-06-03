@@ -71,11 +71,6 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$VPS_DOKPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          for attempt in 1 2 3; do
-            ssh-keyscan -T 20 -H "$VPS_DOKPLOY_HOST" >> ~/.ssh/known_hosts && break
-            test "$attempt" = "3" && exit 1
-            sleep 2
-          done
 
       - name: Trigger Dokploy deploy
         env:
@@ -85,5 +80,5 @@ jobs:
           DEPLOY_SHA: ${{ steps.target.outputs.sha }}
         run: |
           test -n "$VPS_DOKPLOY_USER" || { echo "Missing VPS_DOKPLOY_USER secret"; exit 1; }
-          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes "${VPS_DOKPLOY_USER}@${VPS_DOKPLOY_HOST}" \
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new "${VPS_DOKPLOY_USER}@${VPS_DOKPLOY_HOST}" \
             "/root/bin/deploy-erp-backend.sh '${DEPLOY_SHA}' '${DEPLOY_REF}'"
