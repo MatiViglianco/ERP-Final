@@ -90,11 +90,13 @@ class AccountCalculationTests(TestCase):
             AccountTransaction.Status.PAID,
         )
 
-    def test_stats_use_generated_month_not_transaction_date_month(self):
+    def test_stats_use_transaction_date_not_created_at_month(self):
         client = AccountClient.objects.create(external_id='client-3', first_name='Test', last_name='Client')
+        # Movimiento con fecha real de vale el 31/5, pero cargado/importado el 2/6.
+        # El reporte debe agruparlo por la fecha del vale (mayo), no por la fecha de carga.
         AccountTransaction.objects.create(
             client=client,
-            external_id='generated-in-june',
+            external_id='loaded-in-june-dated-may',
             date=date(2026, 5, 31),
             created_at=timezone.make_aware(datetime(2026, 6, 2, 22, 50, 39)),
             original_amount=Decimal('100'),
@@ -113,10 +115,11 @@ class AccountCalculationTests(TestCase):
 
         self.assertEqual(may_response.status_code, 200)
         self.assertEqual(june_response.status_code, 200)
-        self.assertEqual(may_response.data['results'], [])
-        self.assertEqual(june_response.data['year_totals']['original'], 100.0)
-        self.assertEqual(june_response.data['results'][0]['month'], '2026-06')
-        self.assertEqual(june_response.data['results'][0]['days'][0]['date'], '2026-06-02')
+        # Junio queda vacío: el movimiento pertenece a mayo por su fecha de vale.
+        self.assertEqual(june_response.data['results'], [])
+        self.assertEqual(may_response.data['year_totals']['original'], 100.0)
+        self.assertEqual(may_response.data['results'][0]['month'], '2026-05')
+        self.assertEqual(may_response.data['results'][0]['days'][0]['date'], '2026-05-31')
 
     def test_payment_response_includes_changed_transactions_and_totals(self):
         client = AccountClient.objects.create(external_id='client-4', first_name='Test', last_name='Client')

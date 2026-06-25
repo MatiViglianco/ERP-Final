@@ -1535,7 +1535,7 @@ def account_clients_stats(request):
     qs = (
         AccountTransaction.objects
         .select_related('client')
-        .annotate(generated_date=Coalesce(TruncDate('created_at'), 'date'))
+        .annotate(generated_date=Coalesce('date', TruncDate('created_at')))
         .filter(generated_date__isnull=False)
     )
     if start:
