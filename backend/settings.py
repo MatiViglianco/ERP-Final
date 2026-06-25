@@ -164,3 +164,20 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DJANGO_FILE_UPLOAD_MAX_MEMORY_
 # Custom auth/session settings
 # Si quieres deshabilitar el cierre por inactividad, deja este valor en None.
 INACTIVITY_TIMEOUT = None
+
+# Logging a stdout para que los errores (p. ej. fallas del OCR) queden visibles
+# en la consola de Dokploy. Sin esto, los errores manejados no se registran.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {'format': '[{levelname}] {name}: {message}', 'style': '{'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+    'loggers': {
+        'statsapp': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+    },
+}

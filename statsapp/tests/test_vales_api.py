@@ -1,5 +1,6 @@
 import os
 import unittest
+import urllib.error
 from datetime import date
 from io import BytesIO
 from unittest import mock
@@ -190,6 +191,24 @@ class ValesApiTests(APITestCase):
         python_mock.assert_called_once()
         self.assertTrue(results)
         self.assertEqual(results[0]['cliente']['codigo'], 'C-0089')
+
+    def test_http_json_retries_transient_error_then_succeeds(self):
+        ok = mock.MagicMock()
+        ok.__enter__.return_value.read.return_value = b'{"ok": true}'
+        transient = urllib.error.HTTPError('http://ocr', 429, 'Too Many Requests', {}, BytesIO(b'rate limited'))
+        with mock.patch.object(vales_services.urllib.request, 'urlopen', side_effect=[transient, ok]) as urlopen_mock, \
+                mock.patch.object(vales_services.time, 'sleep'):
+            result = vales_services._http_json('http://ocr', {'a': 1}, {}, retries=1, backoff=0)
+        self.assertEqual(result, {'ok': True})
+        self.assertEqual(urlopen_mock.call_count, 2)
+
+    def test_http_json_does_not_retry_client_error(self):
+        client_error = urllib.error.HTTPError('http://ocr', 400, 'Bad Request', {}, BytesIO(b'bad request'))
+        with mock.patch.object(vales_services.urllib.request, 'urlopen', side_effect=client_error) as urlopen_mock, \
+                mock.patch.object(vales_services.time, 'sleep'):
+            with self.assertRaises(RuntimeError):
+                vales_services._http_json('http://ocr', {'a': 1}, {}, retries=1, backoff=0)
+        self.assertEqual(urlopen_mock.call_count, 1)
 
     @unittest.skipUnless(Image is not None, 'Pillow no esta instalado')
     def test_prepare_ocr_image_downscales_large_photo(self):

@@ -1,7 +1,9 @@
 import base64
 import json
+import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime
@@ -32,6 +34,11 @@ from .text_utils import build_initials, normalize_name_shape, normalize_search_t
 
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
+
+# Estados HTTP transitorios del proveedor OCR que conviene reintentar.
+_OCR_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 OCR_NAME_STOPWORDS = {
     'a',
@@ -1003,21 +1010,38 @@ def serialize_vale_item(item):
     }
 
 
-def _http_json(url, payload, headers, timeout=90):
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={**headers, 'Content-Type': 'application/json'},
-        method='POST',
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode('utf-8', errors='ignore')
-        raise RuntimeError(f'OCR provider error {exc.code}: {body}') from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f'No se pudo conectar al proveedor OCR: {exc.reason}') from exc
+def _http_json(url, payload, headers, timeout=90, retries=1, backoff=3.0):
+    """POST JSON con reintento ante fallas transitorias del proveedor OCR.
+
+    Gemini a veces responde 429 (límite de pedidos) o 5xx, o corta la conexión.
+    Son errores momentáneos: reintentar una vez con una pequeña espera evita que
+    el escaneo falle "a veces". Los reintentos quedan acotados para no superar el
+    timeout de gunicorn (240 s).
+    """
+    data = json.dumps(payload).encode('utf-8')
+    request_headers = {**headers, 'Content-Type': 'application/json'}
+    last_error = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(url, data=data, headers=request_headers, method='POST')
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode('utf-8', errors='ignore')
+            last_error = RuntimeError(f'OCR provider error {exc.code}: {body}')
+            if exc.code in _OCR_RETRYABLE_STATUS and attempt < retries:
+                logger.warning('OCR transitorio (%s), reintentando (%d/%d)', exc.code, attempt + 1, retries)
+                time.sleep(backoff * (attempt + 1))
+                continue
+            raise last_error from exc
+        except urllib.error.URLError as exc:
+            last_error = RuntimeError(f'No se pudo conectar al proveedor OCR: {exc.reason}')
+            if attempt < retries:
+                logger.warning('OCR sin conexión (%s), reintentando (%d/%d)', exc.reason, attempt + 1, retries)
+                time.sleep(backoff * (attempt + 1))
+                continue
+            raise last_error from exc
+    raise last_error if last_error else RuntimeError('OCR provider error desconocido')
 
 
 def _prepare_ocr_image_bytes(raw, content_type):

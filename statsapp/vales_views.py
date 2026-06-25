@@ -1,3 +1,4 @@
+import logging
 from time import perf_counter
 from decimal import Decimal
 
@@ -28,6 +29,8 @@ from .vales_services import (
     suggest_clients,
     update_vale_batch_date,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _latest_sync_iso():
@@ -146,10 +149,18 @@ def ocr_procesar(request):
     try:
         result = process_ocr_uploads(uploads)
     except RuntimeError as exc:
+        logger.warning('OCR falló (proveedor) con %d archivo(s): %s', len(uploads), exc)
         return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     except (TypeError, ValueError) as exc:
+        logger.warning('OCR devolvió una respuesta no interpretable con %d archivo(s): %s', len(uploads), exc)
         return Response(
             {'detail': f'No se pudo interpretar la respuesta del OCR: {exc}'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        logger.exception('OCR falló por un error inesperado con %d archivo(s)', len(uploads))
+        return Response(
+            {'detail': 'Error inesperado procesando el OCR'},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
