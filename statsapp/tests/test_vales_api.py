@@ -1,5 +1,7 @@
 import os
+import unittest
 from datetime import date
+from io import BytesIO
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -8,7 +10,18 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from statsapp.models import AccountClient, AccountClientAlias, AccountTransaction, ValeImportBatch, ValeImportItem
-from statsapp.vales_services import create_vale_batch
+from statsapp import vales_services
+from statsapp.vales_services import (
+    _prepare_ocr_image_bytes,
+    client_payload,
+    create_vale_batch,
+    suggest_clients,
+)
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
 
 
 User = get_user_model()
@@ -149,6 +162,66 @@ class ValesApiTests(APITestCase):
         self.assertEqual(maxi_response.status_code, 200)
         self.assertEqual(maxi_response.data[0]['cliente']['id'], str(maxi.id))
         self.assertGreater(maxi_response.data[0]['similitud'], 0.84)
+
+    def test_suggest_skips_python_scan_when_postgres_is_confident(self):
+        # Cuando Postgres ya trae un match fuerte, el escaneo lento en Python no debe correr.
+        strong_match = [{
+            'cliente': client_payload(self.valeria),
+            'similitud': 0.97,
+            'motivo': 'trigram',
+        }]
+        with mock.patch.object(vales_services, '_postgres_suggest_clients', return_value=strong_match), \
+                mock.patch.object(vales_services, '_python_suggest_clients') as python_mock:
+            results = suggest_clients('Valeria Gomez', limit=4)
+        python_mock.assert_not_called()
+        self.assertTrue(results)
+        self.assertEqual(results[0]['cliente']['codigo'], 'C-0089')
+
+    def test_suggest_falls_back_to_python_when_postgres_is_weak(self):
+        # Si Postgres no trae candidatos, se usa el escaneo en Python como respaldo.
+        python_match = [{
+            'cliente': client_payload(self.valeria),
+            'similitud': 0.8,
+            'motivo': 'manuscrito',
+        }]
+        with mock.patch.object(vales_services, '_postgres_suggest_clients', return_value=[]), \
+                mock.patch.object(vales_services, '_python_suggest_clients', return_value=python_match) as python_mock:
+            results = suggest_clients('Valery', limit=4)
+        python_mock.assert_called_once()
+        self.assertTrue(results)
+        self.assertEqual(results[0]['cliente']['codigo'], 'C-0089')
+
+    @unittest.skipUnless(Image is not None, 'Pillow no esta instalado')
+    def test_prepare_ocr_image_downscales_large_photo(self):
+        big = Image.new('RGB', (3200, 2400), color=(180, 120, 90))
+        buffer = BytesIO()
+        big.save(buffer, format='JPEG', quality=95)
+        original = buffer.getvalue()
+
+        processed, content_type = _prepare_ocr_image_bytes(original, 'image/jpeg')
+
+        self.assertEqual(content_type, 'image/jpeg')
+        self.assertLess(len(processed), len(original))
+        with Image.open(BytesIO(processed)) as result:
+            self.assertLessEqual(max(result.width, result.height), 2000)
+
+    @unittest.skipUnless(Image is not None, 'Pillow no esta instalado')
+    def test_prepare_ocr_image_keeps_small_photo_untouched(self):
+        small = Image.new('RGB', (800, 600), color=(30, 60, 90))
+        buffer = BytesIO()
+        small.save(buffer, format='JPEG', quality=90)
+        original = buffer.getvalue()
+
+        processed, content_type = _prepare_ocr_image_bytes(original, 'image/jpeg')
+
+        self.assertEqual(processed, original)
+        self.assertEqual(content_type, 'image/jpeg')
+
+    def test_prepare_ocr_image_returns_original_on_invalid_bytes(self):
+        garbage = b'not-a-real-image'
+        processed, content_type = _prepare_ocr_image_bytes(garbage, 'image/heic')
+        self.assertEqual(processed, garbage)
+        self.assertEqual(content_type, 'image/heic')
 
     def test_operator_can_create_client_from_vales_flow(self):
         response = self.client.post('/api/auth/login/', {

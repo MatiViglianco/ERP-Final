@@ -7,7 +7,13 @@ import urllib.request
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
+from io import BytesIO
 from uuid import uuid4
+
+try:  # Pillow es opcional: si falta, las imagenes se mandan sin redimensionar.
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
 
 from django.contrib.auth import get_user_model
 from django.db import connection, transaction as db_transaction
@@ -769,8 +775,16 @@ def suggest_clients(alias_value, limit=5):
         return []
 
     postgres_results = _postgres_suggest_clients(alias_value, limit)
-    python_results = _python_suggest_clients(alias_value, limit)
-    merged = _merge_suggestions(postgres_results, python_results, limit=limit)
+    best_pg = float(postgres_results[0].get('similitud') or 0) if postgres_results else 0.0
+    # _python_suggest_clients recorre TODOS los clientes con comparaciones costosas, asi
+    # que escala mal a medida que crece la base. Postgres (trigram + fonetico + prefijo)
+    # ya resuelve la mayoria de los casos por SQL; solo caemos al escaneo en Python como
+    # respaldo cuando Postgres no trae un candidato claro ni completa la lista.
+    if best_pg >= 0.9 or len(postgres_results) >= limit:
+        merged = _merge_suggestions(postgres_results, limit=limit)
+    else:
+        python_results = _python_suggest_clients(alias_value, limit)
+        merged = _merge_suggestions(postgres_results, python_results, limit=limit)
     return _apply_alias_feedback(alias_value, merged, limit=limit)
 
 
@@ -1006,9 +1020,39 @@ def _http_json(url, payload, headers, timeout=90):
         raise RuntimeError(f'No se pudo conectar al proveedor OCR: {exc.reason}') from exc
 
 
+def _prepare_ocr_image_bytes(raw, content_type):
+    """Reduce imagenes grandes antes de mandarlas al OCR para acelerar el escaneo.
+
+    Las fotos de celular pueden venir a 10 MB / varios miles de px, mucho mas de lo
+    que necesita el OCR de manuscrito. Achicarlas baja el tamano que sube a Gemini y
+    lo que Gemini tiene que procesar. Devuelve (bytes, content_type); si Pillow no esta
+    o la imagen no se puede procesar (p. ej. HEIC), se devuelve el original sin tocar.
+    """
+    if not Image or not raw:
+        return raw, content_type
+    max_dim = safe_int(os.environ.get('OCR_IMAGE_MAX_DIM', 2000), 2000)
+    if max_dim <= 0:
+        return raw, content_type
+    try:
+        with Image.open(BytesIO(raw)) as img:
+            img.load()
+            largest = max(img.width, img.height)
+            if largest <= max_dim:
+                return raw, content_type
+            scale = max_dim / float(largest)
+            new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+            resized = img.convert('RGB').resize(new_size, Image.LANCZOS)
+            out = BytesIO()
+            resized.save(out, format='JPEG', quality=85, optimize=True)
+            return out.getvalue(), 'image/jpeg'
+    except Exception:  # pragma: no cover - ante cualquier problema, usar el original
+        return raw, content_type
+
+
 def _make_data_url(upload):
     content_type = getattr(upload, 'content_type', None) or 'image/jpeg'
-    encoded = base64.b64encode(upload.read()).decode('utf-8')
+    raw, content_type = _prepare_ocr_image_bytes(upload.read(), content_type)
+    encoded = base64.b64encode(raw).decode('utf-8')
     return f'data:{content_type};base64,{encoded}'
 
 
