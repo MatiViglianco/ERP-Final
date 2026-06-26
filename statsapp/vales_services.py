@@ -1090,6 +1090,15 @@ def _normalize_ocr_response(payload):
         if amount <= Decimal('0'):
             continue
         detail = str(entry.get('detalle') or '').strip()
+        # A veces el OCR repite el importe dentro de la descripcion; si el detalle
+        # es solo el importe (con o sin simbolos/separadores), lo descartamos.
+        if detail and not amount_breakdown:
+            amount_digits = (
+                str(int(amount)) if amount == amount.to_integral_value()
+                else re.sub(r'\D', '', str(amount))
+            )
+            if amount_digits and re.sub(r'\D', '', detail) == amount_digits:
+                detail = ''
         if amount_breakdown and amount_breakdown not in detail:
             detail = amount_breakdown if not detail else f'{amount_breakdown} - {detail}'
         source_index = safe_int(entry.get('source_index'), -1)
@@ -1130,7 +1139,9 @@ def _ocr_prompt():
         'Si un nombre esta abreviado o parecido al real, conserva el texto tal como se lee: por ejemplo "Maxi Camp", "Matias Vigli", "Valen Belande". '
         'No fuerces apellidos completos ni inventes clientes; el sistema despues hara el match contra la base. '
         'En manuscritos, a/o/e/u pueden parecerse, n/m/r pueden confundirse y una coma puede indicar apellido-nombre; usa el contexto de toda la linea. '
-        'Cada vale debe tener importe numerico, cliente_raw string, detalle string, source_index integer y confianza de 0 a 1. '
+        'Los importes son SIEMPRE numeros enteros en pesos: sin centavos, sin decimales y sin separadores de miles. Devolve importe como entero, por ejemplo 13570 (nunca 13.570 ni 13,57). '
+        'El campo detalle debe quedar vacio ("") salvo que haya una nota real escrita en la hoja; NUNCA copies el importe ni el nombre del cliente dentro de detalle. La unica excepcion es el desglose de una suma en la misma linea (por ejemplo "4388 + 9182"). '
+        'Cada vale debe tener importe entero, cliente_raw string, detalle string, source_index integer y confianza de 0 a 1. '
         'Si no estas seguro de un nombre, manten cliente_raw con tu mejor lectura y baja confianza. '
         'Si no estas seguro de la fecha, usa null. No inventes importes ni nombres.'
     )
@@ -1154,8 +1165,8 @@ def _ocr_response_schema():
                     'type': 'object',
                     'properties': {
                         'importe': {
-                            'type': 'number',
-                            'description': 'Importe numerico total del vale, sin moneda ni separadores de miles. Si la linea tiene varios importes para el mismo cliente, usar la suma.',
+                            'type': 'integer',
+                            'description': 'Importe TOTAL del vale en pesos ENTEROS: sin centavos, sin decimales y sin separadores de miles (ej. 13570). Si la linea tiene varios importes para el mismo cliente, usar la suma.',
                         },
                         'cliente_raw': {
                             'type': 'string',
@@ -1163,7 +1174,7 @@ def _ocr_response_schema():
                         },
                         'detalle': {
                             'type': 'string',
-                            'description': 'Detalle adicional del vale. Si la linea trae varios importes para el mismo cliente, incluir el desglose, por ejemplo "4388 + 9182".',
+                            'description': 'Vacio ("") salvo que haya una nota real escrita en la hoja. NUNCA repetir aca el importe ni el nombre del cliente. Unica excepcion: el desglose de una suma en la misma linea, por ejemplo "4388 + 9182".',
                         },
                         'source_index': {
                             'type': 'integer',

@@ -650,3 +650,33 @@ class ValesApiTests(APITestCase):
         response = self.client.post('/api/ocr/procesar/', {'fotos': [upload]}, format='multipart')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['vales'][0]['bbox'], {'x': 0.1, 'y': 0.52, 'w': 0.72, 'h': 0.05})
+
+    def test_ocr_schema_amount_is_integer(self):
+        schema = vales_services._ocr_response_schema()
+        importe = schema['properties']['vales']['items']['properties']['importe']
+        self.assertEqual(importe['type'], 'integer')
+
+    @mock.patch.dict(os.environ, {
+        'OCR_PROVIDER': 'gemini',
+        'GEMINI_API_KEY': 'test-key',
+        'GEMINI_OCR_MODEL': 'gemini-3-flash-preview',
+    }, clear=False)
+    @mock.patch('statsapp.vales_services._http_json')
+    def test_ocr_process_strips_amount_repeated_in_detail(self, http_json_mock):
+        http_json_mock.return_value = {
+            'candidates': [{
+                'content': {
+                    'parts': [{
+                        'text': '{"fecha_detectada":"2026-04-01","vales":[{"importe":54731,"cliente_raw":"Silvi Farias","detalle":"$ 54.731","source_index":0,"confianza":0.9}]}'
+                    }]
+                }
+            }]
+        }
+        self.authenticate()
+        upload = SimpleUploadedFile('vale-detalle.jpeg', b'fake-image-bytes', content_type='image/jpeg')
+        response = self.client.post('/api/ocr/procesar/', {'fotos': [upload]}, format='multipart')
+        self.assertEqual(response.status_code, 200)
+        vale = response.data['vales'][0]
+        self.assertEqual(vale['importe'], 54731.0)
+        # El importe repetido en la descripcion se descarta.
+        self.assertEqual(vale['detalle'], '')
