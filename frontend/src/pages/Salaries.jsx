@@ -295,7 +295,51 @@ export default function SalariesPage() {
               Transferencias, gastos en Sueldos y consumos de cuenta corriente que todavia no tienen empleado asociado.
             </Typography>
             <Divider sx={{ my: 2 }} />
-            <Box sx={{ overflowX: 'auto' }}>
+            <Box sx={{ display: { xs: 'block', md: 'none' } }}>
+              {(unmatched.items || []).map((candidate) => {
+                const candidateKey = `${candidate.source}:${candidate.source_id}`
+                return (
+                  <Stack key={candidateKey} spacing={1.5} sx={{ py: 2, borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                      <Typography variant="body2" fontWeight={700}>{formatDate(candidate.date)}</Typography>
+                      <Chip size="small" color={SOURCE_COLORS[candidate.source] || 'default'} label={candidate.source_label} />
+                    </Stack>
+                    <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{candidate.description}</Typography>
+                    <Typography fontWeight={800}>{formatCurrency(candidate.amount)}</Typography>
+                    {employees.length ? (
+                      <Stack spacing={1}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Empleado</InputLabel>
+                          <Select
+                            label="Empleado"
+                            value={candidateEmployees[candidateKey] || ''}
+                            onChange={(event) => setCandidateEmployees((prev) => ({ ...prev, [candidateKey]: event.target.value }))}
+                          >
+                            {employees.filter((employee) => employee.active).map((employee) => (
+                              <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                        <Button
+                          fullWidth
+                          variant="outlined"
+                          startIcon={<LinkIcon />}
+                          disabled={actionLoading || !candidateEmployees[candidateKey]}
+                          onClick={() => assignCandidate(candidate)}
+                        >
+                          Asignar
+                        </Button>
+                      </Stack>
+                    ) : (
+                      <Button fullWidth variant="outlined" startIcon={<PersonAddIcon />} onClick={() => prepareEmployee(candidate)}>
+                        Preparar alta
+                      </Button>
+                    )}
+                  </Stack>
+                )
+              })}
+            </Box>
+            <Box sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
               <Table size="small" sx={{ minWidth: 860 }}>
                 <TableHead>
                   <TableRow>
