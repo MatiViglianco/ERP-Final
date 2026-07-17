@@ -5,7 +5,7 @@ from threading import Lock
 from time import sleep
 
 from django.db import OperationalError, transaction
-from django.db.models import Q, Sum
+from django.db.models import Max, Q, Sum
 from django.utils import timezone
 
 from .models import (
@@ -81,6 +81,114 @@ def movement_payload(movement):
     }
 
 
+def _bank_movement_description(tx):
+    detail = ' - '.join(part.strip() for part in (tx.concept, tx.description) if part and part.strip())
+    return f"{tx.batch.get_bank_display()}: {detail}"
+
+
+def _latest_bank_dates():
+    dates = {'santander': None, 'bancon': None}
+    for row in (
+        BankTransaction.objects
+        .values('batch__bank')
+        .annotate(latest_date=Max('date'))
+    ):
+        bank = row.get('batch__bank')
+        if bank in dates and row.get('latest_date'):
+            dates[bank] = row['latest_date'].isoformat()
+    return dates
+
+
+def _salary_source_diagnostics(start_date, end_date, limit=100):
+    bank_period = BankTransaction.objects.filter(date__gte=start_date, date__lte=end_date)
+    bank_candidates = (
+        bank_period
+        .filter(amount__lt=0, employee_movement__isnull=True)
+        .filter(Q(concept__icontains='transfer') | Q(description__icontains='transfer'))
+        .select_related('batch')
+    )
+    cash_period = ExpenseEntry.objects.filter(
+        date__gte=start_date,
+        date__lte=end_date,
+        category__iexact=SALARY_CATEGORY,
+    )
+    cash_candidates = cash_period.filter(employee_movement__isnull=True)
+    account_period = AccountTransaction.objects.filter(
+        date__gte=start_date,
+        date__lte=end_date,
+        original_amount__gt=0,
+    )
+    account_candidates = (
+        account_period
+        .filter(employee_movement__isnull=True, client__employee_profile__isnull=True)
+        .select_related('client')
+    )
+
+    items = []
+    for tx in bank_candidates.order_by('-date', '-id')[:limit]:
+        suggested_alias = (tx.description or tx.concept or '').strip()
+        items.append({
+            'source': EmployeeMovement.Source.BANK_TRANSFER,
+            'source_label': EmployeeMovement.Source.BANK_TRANSFER.label,
+            'source_id': str(tx.id),
+            'date': tx.date.isoformat(),
+            'amount': abs(float(tx.amount or 0)),
+            'description': _bank_movement_description(tx),
+            'suggested_name': suggested_alias,
+            'suggested_alias': suggested_alias,
+            'account_client_id': None,
+        })
+    for expense in cash_candidates.order_by('-date', '-created_at')[:limit]:
+        suggested_alias = (expense.subcategory or expense.description or '').strip()
+        items.append({
+            'source': EmployeeMovement.Source.CASH_EXPENSE,
+            'source_label': EmployeeMovement.Source.CASH_EXPENSE.label,
+            'source_id': str(expense.id),
+            'date': expense.date.isoformat(),
+            'amount': float(expense.amount or 0),
+            'description': f"{expense.method}: {expense.subcategory or expense.description}",
+            'suggested_name': suggested_alias,
+            'suggested_alias': suggested_alias,
+            'account_client_id': None,
+        })
+    for tx in account_candidates.order_by('-date', '-id')[:limit]:
+        client_name = tx.client.full_name if tx.client else ''
+        items.append({
+            'source': EmployeeMovement.Source.ACCOUNT_CURRENT,
+            'source_label': EmployeeMovement.Source.ACCOUNT_CURRENT.label,
+            'source_id': tx.external_id,
+            'date': tx.date.isoformat() if tx.date else None,
+            'amount': float(tx.original_amount or 0),
+            'description': f"Cuenta corriente: {tx.description or tx.external_id}",
+            'suggested_name': client_name,
+            'suggested_alias': client_name,
+            'account_client_id': str(tx.client_id),
+        })
+    items.sort(key=lambda item: (item.get('date') or '', item['source_id']), reverse=True)
+
+    pending_counts = {
+        EmployeeMovement.Source.BANK_TRANSFER: bank_candidates.count(),
+        EmployeeMovement.Source.CASH_EXPENSE: cash_candidates.count(),
+        EmployeeMovement.Source.ACCOUNT_CURRENT: account_candidates.count(),
+    }
+    return {
+        'sources': {
+            'active_employees': Employee.objects.filter(active=True).count(),
+            'bank_transactions': bank_period.count(),
+            'bank_outgoing': bank_period.filter(amount__lt=0).count(),
+            'salary_cash_expenses': cash_period.count(),
+            'account_current_transactions': account_period.count(),
+            'latest_bank_dates': _latest_bank_dates(),
+        },
+        'unmatched': {
+            'count': sum(pending_counts.values()),
+            'counts': pending_counts,
+            'items': items[:limit],
+            'truncated': sum(pending_counts.values()) > limit,
+        },
+    }
+
+
 def _employee_matchers():
     employees = list(
         Employee.objects
@@ -151,7 +259,7 @@ def _sync_employee_movements_once(start_date, end_date):
             source=EmployeeMovement.Source.BANK_TRANSFER,
             movement_date=tx.date,
             amount=Decimal(str(tx.amount or 0)),
-            description=f"{tx.batch.get_bank_display()}: {tx.concept or tx.description}",
+            description=_bank_movement_description(tx),
             alias=alias,
         )
         _, was_created = EmployeeMovement.objects.update_or_create(
@@ -304,7 +412,74 @@ def salaries_summary(start_date, end_date, sync=True):
         },
         'employees': employee_rows,
         'movements': movements,
+        **_salary_source_diagnostics(start_date, end_date),
     }
+
+
+@transaction.atomic
+def assign_employee_movement(employee, source, source_id, alias=''):
+    if not employee.active:
+        raise ValueError('El empleado seleccionado esta inactivo')
+
+    matched_alias = (alias or '').strip()
+    if source == EmployeeMovement.Source.BANK_TRANSFER:
+        tx = BankTransaction.objects.select_related('batch').filter(pk=source_id, amount__lt=0).first()
+        if not tx:
+            raise ValueError('Transferencia bancaria no encontrada')
+        matched_alias = matched_alias or (tx.description or tx.concept or '').strip()
+        defaults = _movement_defaults(
+            employee,
+            source,
+            tx.date,
+            Decimal(str(tx.amount or 0)),
+            _bank_movement_description(tx),
+            matched_alias,
+        )
+        lookup = {'bank_transaction': tx}
+    elif source == EmployeeMovement.Source.CASH_EXPENSE:
+        expense = ExpenseEntry.objects.filter(pk=source_id).first()
+        if not expense:
+            raise ValueError('Gasto en efectivo no encontrado')
+        matched_alias = matched_alias or (expense.subcategory or expense.description or '').strip()
+        defaults = _movement_defaults(
+            employee,
+            source,
+            expense.date,
+            expense.amount or Decimal('0'),
+            f"{expense.method}: {expense.subcategory or expense.description}",
+            matched_alias,
+        )
+        lookup = {'expense_entry': expense}
+    elif source == EmployeeMovement.Source.ACCOUNT_CURRENT:
+        account_tx = AccountTransaction.objects.select_related('client').filter(external_id=source_id).first()
+        if not account_tx:
+            raise ValueError('Movimiento de cuenta corriente no encontrado')
+        linked_employee = Employee.objects.filter(account_client=account_tx.client).exclude(pk=employee.pk).first()
+        if linked_employee:
+            raise ValueError(f'La cuenta corriente ya esta vinculada a {linked_employee.name}')
+        if employee.account_client_id and employee.account_client_id != account_tx.client_id:
+            raise ValueError('El empleado ya tiene otra cuenta corriente vinculada')
+        if employee.account_client_id != account_tx.client_id:
+            employee.account_client = account_tx.client
+            employee.save(update_fields=['account_client', 'updated_at'])
+        matched_alias = matched_alias or account_tx.client.full_name
+        defaults = _movement_defaults(
+            employee,
+            source,
+            account_tx.date,
+            account_tx.original_amount or Decimal('0'),
+            f"Cuenta corriente: {account_tx.description or account_tx.external_id}",
+            matched_alias,
+        )
+        lookup = {'account_transaction': account_tx}
+    else:
+        raise ValueError('Origen de movimiento invalido')
+
+    if matched_alias:
+        ensure_employee_alias(employee, matched_alias)
+    defaults['status'] = EmployeeMovement.Status.MANUAL
+    movement, _ = EmployeeMovement.objects.update_or_create(defaults=defaults, **lookup)
+    return movement
 
 
 def create_employee(name, aliases=None, account_client=None, notes=''):

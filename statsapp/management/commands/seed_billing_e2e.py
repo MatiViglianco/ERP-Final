@@ -34,7 +34,7 @@ class Command(BaseCommand):
         Invoice.objects.filter(client__external_id='E2E-CLIENTE-FACT').delete()
         AccountTransaction.objects.filter(external_id='E2E-TX-FACT-1').delete()
         EmployeeMovement.objects.all().delete()
-        Employee.objects.filter(name='Diego E2E').delete()
+        Employee.objects.filter(name__in=['Diego E2E', 'Juan Interno E2E']).delete()
         ExpenseEntry.objects.filter(external_id='E2E-SUELDO-EFECTIVO').delete()
         BankUploadBatch.objects.filter(original_filename='e2e-sueldos.csv').delete()
         AccountTransaction.objects.filter(external_id='E2E-SUELDO-CC').delete()
@@ -117,6 +117,7 @@ class Command(BaseCommand):
             },
         )
         create_employee('Diego E2E', aliases=['DIEGO E2E', 'DIEGO'], account_client=employee_client)
+        create_employee('Juan Interno E2E', aliases=['JUAN INTERNO E2E'])
         salary_batch = BankUploadBatch.objects.create(
             bank='santander',
             original_filename='e2e-sueldos.csv',
@@ -129,6 +130,13 @@ class Command(BaseCommand):
             concept='TRANSFERENCIA DIEGO E2E',
             description='Pago sueldo',
             amount=-45000,
+        )
+        BankTransaction.objects.create(
+            batch=salary_batch,
+            date=date(2026, 7, 11),
+            concept='TRANSFERENCIA HOMEBANKING',
+            description='PEREZ JUAN PRUEBA',
+            amount=-4500,
         )
         ExpenseEntry.objects.create(
             external_id='E2E-SUELDO-EFECTIVO',

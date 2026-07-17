@@ -13,6 +13,7 @@ from statsapp.models import (
     AccountTransaction,
     BankTransaction,
     BankUploadBatch,
+    EmployeeAlias,
     EmployeeMovement,
     ExpenseEntry,
 )
@@ -97,6 +98,114 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['totals']['cash_expense'], 35000.0)
         self.assertEqual(response.data['employees'][0]['employee_name'], 'Diego Empleado')
+
+    def test_summary_reports_unmatched_sources_and_latest_bank_dates(self):
+        batch = BankUploadBatch.objects.create(
+            bank='bancon',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 12),
+            concept='TRANSFERENCIA HOMEBANKING',
+            description='PEREZ JUAN',
+            amount=-42000,
+        )
+        ExpenseEntry.objects.create(
+            date=date(2026, 7, 13),
+            amount=Decimal('10000'),
+            method=ExpenseEntry.Method.CASH,
+            category='SUELDOS',
+            subcategory='PERSONA SIN CONFIGURAR',
+        )
+        unlinked_client = AccountClient.objects.create(
+            external_id='EMP-SIN-VINCULAR',
+            first_name='Ana',
+            last_name='Pendiente',
+        )
+        AccountTransaction.objects.create(
+            client=unlinked_client,
+            external_id='cc-pendiente-1',
+            description='Consumo empleado sin vincular',
+            date=date(2026, 7, 14),
+            original_amount=Decimal('7000'),
+        )
+
+        result = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+
+        self.assertEqual(result['sources']['bank_transactions'], 1)
+        self.assertEqual(result['sources']['salary_cash_expenses'], 1)
+        self.assertEqual(result['sources']['account_current_transactions'], 1)
+        self.assertEqual(result['sources']['latest_bank_dates']['bancon'], '2026-07-12')
+        self.assertEqual(result['unmatched']['count'], 3)
+        self.assertEqual(
+            {item['source'] for item in result['unmatched']['items']},
+            {'bank_transfer', 'cash_expense', 'account_current'},
+        )
+
+    def test_assign_pending_bank_transfer_adds_alias_and_movement(self):
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        bank_tx = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 15),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='PEREZ JUAN',
+            amount=-55000,
+        )
+
+        response = self.api.post('/api/salaries/movements/assign/', {
+            'employee_id': str(self.employee.id),
+            'source': 'bank_transfer',
+            'source_id': str(bank_tx.id),
+            'alias': 'PEREZ JUAN',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['status'], 'manual')
+        self.assertEqual(response.data['employee_name'], 'Diego Empleado')
+        self.assertTrue(EmployeeAlias.objects.filter(employee=self.employee, normalized_alias='perez juan').exists())
+        self.assertTrue(EmployeeMovement.objects.filter(bank_transaction=bank_tx, employee=self.employee).exists())
+
+    def test_assign_account_current_links_client_for_future_movements(self):
+        employee_without_account = create_employee('Rocio Empleado', aliases=['ROCIO'])
+        client = AccountClient.objects.create(
+            external_id='EMP-ROCIO-CC',
+            first_name='Rocio',
+            last_name='Cuenta',
+        )
+        account_tx = AccountTransaction.objects.create(
+            client=client,
+            external_id='cc-rocio-1',
+            description='Retiro mercaderia',
+            date=date(2026, 7, 16),
+            original_amount=Decimal('8000'),
+        )
+
+        response = self.api.post('/api/salaries/movements/assign/', {
+            'employee_id': str(employee_without_account.id),
+            'source': 'account_current',
+            'source_id': account_tx.external_id,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        employee_without_account.refresh_from_db()
+        self.assertEqual(employee_without_account.account_client_id, client.id)
+        self.assertEqual(response.data['amount'], 8000.0)
+
+    def test_assign_rejects_invalid_employee_id(self):
+        response = self.api.post('/api/salaries/movements/assign/', {
+            'employee_id': 'not-a-uuid',
+            'source': 'bank_transfer',
+            'source_id': '1',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 'Empleado invalido')
 
     def test_salary_sync_rolls_back_partial_results_on_database_error(self):
         batch = BankUploadBatch.objects.create(

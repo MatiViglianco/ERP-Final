@@ -2,10 +2,19 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
+from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 
-from .models import AccountClient, Employee, EmployeeAlias
-from .salary_services import create_employee, employee_payload, ensure_employee_alias, month_range, salaries_summary
+from .models import AccountClient, Employee, EmployeeAlias, EmployeeMovement
+from .salary_services import (
+    assign_employee_movement,
+    create_employee,
+    employee_payload,
+    ensure_employee_alias,
+    month_range,
+    movement_payload,
+    salaries_summary,
+)
 
 
 @api_view(['GET'])
@@ -37,6 +46,37 @@ def employees_list(request):
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(employee_payload(employee), status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def salary_movement_assign(request):
+    data = request.data or {}
+    employee_id = data.get('employee_id')
+    if not employee_id:
+        return Response({'detail': 'Empleado requerido'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        employee = Employee.objects.filter(pk=employee_id).first()
+    except (TypeError, ValueError, ValidationError):
+        employee = None
+    if not employee:
+        return Response({'detail': 'Empleado invalido'}, status=status.HTTP_400_BAD_REQUEST)
+    source = (data.get('source') or '').strip()
+    if source not in EmployeeMovement.Source.values:
+        return Response({'detail': 'Origen de movimiento invalido'}, status=status.HTTP_400_BAD_REQUEST)
+    source_id = str(data.get('source_id') or '').strip()
+    if not source_id:
+        return Response({'detail': 'Movimiento requerido'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        movement = assign_employee_movement(
+            employee=employee,
+            source=source,
+            source_id=source_id,
+            alias=data.get('alias') or '',
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(movement_payload(movement), status=status.HTTP_201_CREATED)
 
 
 @api_view(['PATCH', 'DELETE'])

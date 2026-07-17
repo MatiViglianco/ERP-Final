@@ -57,6 +57,7 @@ from .fiscal_views import (
 from .salary_views import (
     employee_detail,
     employees_list,
+    salary_movement_assign,
     salaries_dashboard,
 )
 
@@ -111,4 +112,5 @@ urlpatterns = [
     path('salaries/summary/', salaries_dashboard, name='salaries_summary'),
     path('salaries/employees/', employees_list, name='salaries_employees'),
     path('salaries/employees/<uuid:pk>/', employee_detail, name='salaries_employee_detail'),
+    path('salaries/movements/assign/', salary_movement_assign, name='salaries_movement_assign'),
 ]
