@@ -59,6 +59,7 @@ from .salary_views import (
     employees_list,
     salary_movement_assign,
     salaries_dashboard,
+    salaries_monthly,
 )
 
 urlpatterns = [
@@ -110,6 +111,7 @@ urlpatterns = [
     path('billing/getnet/terminals/<int:pk>/', getnet_terminal_detail, name='billing_getnet_terminal_detail'),
     path('billing/getnet/webhook/', getnet_webhook, name='billing_getnet_webhook'),
     path('salaries/summary/', salaries_dashboard, name='salaries_summary'),
+    path('salaries/monthly/', salaries_monthly, name='salaries_monthly'),
     path('salaries/employees/', employees_list, name='salaries_employees'),
     path('salaries/employees/<uuid:pk>/', employee_detail, name='salaries_employee_detail'),
     path('salaries/movements/assign/', salary_movement_assign, name='salaries_movement_assign'),

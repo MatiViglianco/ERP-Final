@@ -39,7 +39,7 @@ class Command(BaseCommand):
         Employee.objects.filter(name__in=['Diego E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']).delete()
         ExpenseEntry.objects.filter(external_id='E2E-SUELDO-EFECTIVO').delete()
         BankUploadBatch.objects.filter(original_filename='e2e-sueldos.csv').delete()
-        AccountTransaction.objects.filter(external_id='E2E-SUELDO-CC').delete()
+        AccountTransaction.objects.filter(external_id__startswith='E2E-SUELDO-CC').delete()
         Branch.objects.filter(slug__in=['e2e-central', 'e2e-norte']).delete()
         UploadBatch.objects.filter(original_filename__in=['e2e-central-kretz.csv', 'e2e-norte-kretz.csv']).delete()
 
@@ -156,4 +156,17 @@ class Command(BaseCommand):
             payments=[],
             meta={'e2e': True},
         )
+        for index in range(1, 9):
+            AccountTransaction.objects.create(
+                client=employee_client,
+                branch=branch_norte,
+                external_id=f'E2E-SUELDO-CC-PAGE-{index}',
+                description=f'Movimiento paginado {index}',
+                date=date(2026, 7, index),
+                original_amount=Decimal('100'),
+                paid_amount=Decimal('0'),
+                status=AccountTransaction.Status.ACTIVE,
+                payments=[],
+                meta={'e2e': True},
+            )
         self.stdout.write(self.style.SUCCESS('Datos E2E de facturacion cargados'))

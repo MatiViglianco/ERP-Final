@@ -449,6 +449,80 @@ def salaries_summary(start_date, end_date, sync=True):
     }
 
 
+def salaries_monthly_summary(year, sync=True):
+    selected_year = int(year)
+    start_date = date(selected_year, 1, 1)
+    end_date = date(selected_year, 12, 31)
+    employee_sync = ensure_salary_category_employees()
+    if sync:
+        with _SYNC_LOCK:
+            try:
+                sync_result = _sync_employee_movements_with_retry(start_date, end_date)
+            except OperationalError as exc:
+                sync_result = {'created': 0, 'updated': 0, 'skipped': str(exc)}
+    else:
+        sync_result = {'created': 0, 'updated': 0}
+
+    by_employee = defaultdict(lambda: {
+        'employee_id': '',
+        'employee_name': '',
+        'bank_transfer': Decimal('0'),
+        'cash_expense': Decimal('0'),
+        'account_current': Decimal('0'),
+        'total': Decimal('0'),
+        'months': defaultdict(lambda: {
+            'bank_transfer': Decimal('0'),
+            'cash_expense': Decimal('0'),
+            'account_current': Decimal('0'),
+            'total': Decimal('0'),
+        }),
+    })
+    movements = (
+        EmployeeMovement.objects
+        .select_related('employee')
+        .filter(date__gte=start_date, date__lte=end_date)
+        .order_by('employee__name', 'date')
+    )
+    for movement in movements:
+        amount = movement.amount or Decimal('0')
+        entry = by_employee[movement.employee_id]
+        entry['employee_id'] = str(movement.employee_id)
+        entry['employee_name'] = movement.employee.name
+        entry[movement.source] += amount
+        entry['total'] += amount
+        month_entry = entry['months'][movement.date.month]
+        month_entry[movement.source] += amount
+        month_entry['total'] += amount
+
+    employee_rows = []
+    for entry in by_employee.values():
+        employee_rows.append({
+            'employee_id': entry['employee_id'],
+            'employee_name': entry['employee_name'],
+            'bank_transfer': float(entry['bank_transfer']),
+            'cash_expense': float(entry['cash_expense']),
+            'account_current': float(entry['account_current']),
+            'total': float(entry['total']),
+            'months': [
+                {
+                    'month': month_number,
+                    'bank_transfer': float(entry['months'][month_number]['bank_transfer']),
+                    'cash_expense': float(entry['months'][month_number]['cash_expense']),
+                    'account_current': float(entry['months'][month_number]['account_current']),
+                    'total': float(entry['months'][month_number]['total']),
+                }
+                for month_number in range(1, 13)
+            ],
+        })
+    employee_rows.sort(key=lambda item: item['total'], reverse=True)
+    return {
+        'year': selected_year,
+        'sync': sync_result,
+        'employee_sync': employee_sync,
+        'employees': employee_rows,
+    }
+
+
 @transaction.atomic
 def assign_employee_movement(employee, source, source_id, alias=''):
     if not employee.active:

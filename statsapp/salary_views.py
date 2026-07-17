@@ -14,6 +14,7 @@ from .salary_services import (
     ensure_employee_alias,
     month_range,
     movement_payload,
+    salaries_monthly_summary,
     salaries_summary,
 )
 
@@ -24,6 +25,19 @@ def salaries_dashboard(request):
     start, end = month_range(request.query_params.get('year'), request.query_params.get('month'))
     should_sync = (request.query_params.get('sync') or '1').strip().lower() not in {'0', 'false', 'no'}
     return Response(salaries_summary(start, end, sync=should_sync))
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def salaries_monthly(request):
+    try:
+        year = int(request.query_params.get('year'))
+        if year < 2000 or year > 2100:
+            raise ValueError
+    except (TypeError, ValueError):
+        return Response({'detail': 'Anio invalido'}, status=status.HTTP_400_BAD_REQUEST)
+    should_sync = (request.query_params.get('sync') or '1').strip().lower() not in {'0', 'false', 'no'}
+    return Response(salaries_monthly_summary(year, sync=should_sync))
 
 
 @api_view(['GET', 'POST'])

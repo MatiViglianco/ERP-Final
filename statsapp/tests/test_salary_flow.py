@@ -20,7 +20,12 @@ from statsapp.models import (
     ExpenseEntry,
     ExpenseSubcategory,
 )
-from statsapp.salary_services import create_employee, salaries_summary, sync_employee_movements
+from statsapp.salary_services import (
+    create_employee,
+    salaries_monthly_summary,
+    salaries_summary,
+    sync_employee_movements,
+)
 
 
 class SalaryFlowTests(TestCase):
@@ -162,6 +167,46 @@ class SalaryFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('ZAIRA', [employee['name'] for employee in response.data])
+
+    def test_monthly_summary_groups_employee_sources_without_duplicates(self):
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 6, 1),
+            fecha_hasta=date(2026, 6, 30),
+        )
+        BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 6, 10),
+            concept='TRANSFERENCIA DIEGO EMP',
+            amount=-40000,
+        )
+        ExpenseEntry.objects.create(
+            date=date(2026, 7, 6),
+            amount=Decimal('15000'),
+            method=ExpenseEntry.Method.CASH,
+            category='SUELDOS',
+            subcategory='DIEGO',
+        )
+
+        first = salaries_monthly_summary(2026, sync=True)
+        second = salaries_monthly_summary(2026, sync=True)
+
+        diego = next(row for row in second['employees'] if row['employee_name'] == 'Diego Empleado')
+        self.assertEqual(first['sync']['created'], 2)
+        self.assertEqual(second['sync']['created'], 0)
+        self.assertEqual(diego['total'], 55000.0)
+        self.assertEqual(diego['months'][5]['bank_transfer'], 40000.0)
+        self.assertEqual(diego['months'][6]['cash_expense'], 15000.0)
+        self.assertEqual(len(diego['months']), 12)
+
+    def test_monthly_summary_endpoint_validates_year(self):
+        invalid = self.api.get('/api/salaries/monthly/?year=invalid')
+        valid = self.api.get('/api/salaries/monthly/?year=2026&sync=0')
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.data['detail'], 'Anio invalido')
+        self.assertEqual(valid.status_code, 200)
+        self.assertEqual(valid.data['year'], 2026)
 
     def test_summary_keeps_unmatched_diagnostics_for_api_compatibility(self):
         batch = BankUploadBatch.objects.create(
