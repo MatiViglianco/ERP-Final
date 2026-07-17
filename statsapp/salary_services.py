@@ -15,6 +15,7 @@ from .models import (
     EmployeeAlias,
     EmployeeMovement,
     ExpenseEntry,
+    ExpenseSubcategory,
 )
 from .text_utils import normalize_search_text
 
@@ -29,12 +30,42 @@ def ensure_employee_alias(employee, alias):
     normalized = normalize_search_text(alias_value)
     if not normalized:
         return None
-    existing = EmployeeAlias.objects.filter(normalized_alias=normalized).first()
-    if existing:
-        if existing.employee_id != employee.id:
-            raise ValueError(f'El alias "{alias_value}" ya esta asociado a otro empleado')
-        return existing
-    return EmployeeAlias.objects.create(employee=employee, alias=alias_value)
+    alias_obj, _ = EmployeeAlias.objects.get_or_create(
+        normalized_alias=normalized,
+        defaults={'employee': employee, 'alias': alias_value},
+    )
+    if alias_obj.employee_id != employee.id:
+        raise ValueError(f'El alias "{alias_value}" ya esta asociado a otro empleado')
+    return alias_obj
+
+
+def ensure_salary_category_employees():
+    created = 0
+    configured = 0
+    names = (
+        ExpenseSubcategory.objects
+        .filter(category__name__iexact=SALARY_CATEGORY)
+        .exclude(name='')
+        .order_by('name')
+        .values_list('name', flat=True)
+    )
+    for raw_name in names:
+        name = (raw_name or '').strip()
+        normalized = normalize_search_text(name)
+        if len(normalized) < 2:
+            continue
+        configured += 1
+        if EmployeeAlias.objects.filter(normalized_alias=normalized).exists():
+            continue
+        employee = Employee.objects.filter(name__iexact=name).first()
+        if not employee:
+            employee, was_created = Employee.objects.get_or_create(
+                name=name,
+                defaults={'notes': 'Sincronizado desde Gastos / SUELDOS'},
+            )
+            created += 1 if was_created else 0
+        ensure_employee_alias(employee, name)
+    return {'configured': configured, 'created': created}
 
 
 def month_range(year=None, month=None):
@@ -348,6 +379,7 @@ def _sync_employee_movements_with_retry(start_date, end_date):
 
 
 def salaries_summary(start_date, end_date, sync=True):
+    employee_sync = ensure_salary_category_employees()
     if sync:
         with _SYNC_LOCK:
             try:
@@ -404,6 +436,7 @@ def salaries_summary(start_date, end_date, sync=True):
             'end': end_date.isoformat(),
         },
         'sync': sync_result,
+        'employee_sync': employee_sync,
         'totals': {
             'bank_transfer': float(totals[EmployeeMovement.Source.BANK_TRANSFER]),
             'cash_expense': float(totals[EmployeeMovement.Source.CASH_EXPENSE]),

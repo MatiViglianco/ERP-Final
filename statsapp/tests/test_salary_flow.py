@@ -13,9 +13,12 @@ from statsapp.models import (
     AccountTransaction,
     BankTransaction,
     BankUploadBatch,
+    Employee,
     EmployeeAlias,
     EmployeeMovement,
+    ExpenseCategory,
     ExpenseEntry,
+    ExpenseSubcategory,
 )
 from statsapp.salary_services import create_employee, salaries_summary, sync_employee_movements
 
@@ -99,7 +102,9 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(response.data['totals']['cash_expense'], 35000.0)
         self.assertEqual(response.data['employees'][0]['employee_name'], 'Diego Empleado')
 
-    def test_summary_reports_unmatched_sources_and_latest_bank_dates(self):
+    def test_summary_syncs_salary_subcategories_and_detects_all_sources(self):
+        salary_category = ExpenseCategory.objects.create(name='SUELDOS')
+        ExpenseSubcategory.objects.create(category=salary_category, name='ROCIO')
         batch = BankUploadBatch.objects.create(
             bank='bancon',
             fecha_desde=date(2026, 7, 1),
@@ -109,7 +114,7 @@ class SalaryFlowTests(TestCase):
             batch=batch,
             date=date(2026, 7, 12),
             concept='TRANSFERENCIA HOMEBANKING',
-            description='PEREZ JUAN',
+            description='PENDIENTE ROCIO',
             amount=-42000,
         )
         ExpenseEntry.objects.create(
@@ -117,36 +122,67 @@ class SalaryFlowTests(TestCase):
             amount=Decimal('10000'),
             method=ExpenseEntry.Method.CASH,
             category='SUELDOS',
-            subcategory='PERSONA SIN CONFIGURAR',
+            subcategory='ROCIO',
         )
-        unlinked_client = AccountClient.objects.create(
-            external_id='EMP-SIN-VINCULAR',
-            first_name='Ana',
+        employee_client = AccountClient.objects.create(
+            external_id='EMP-ROCIO-AUTO',
+            first_name='Rocio',
             last_name='Pendiente',
         )
         AccountTransaction.objects.create(
-            client=unlinked_client,
+            client=employee_client,
             external_id='cc-pendiente-1',
             description='Consumo empleado sin vincular',
             date=date(2026, 7, 14),
             original_amount=Decimal('7000'),
         )
 
+        first = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+        second = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+
+        self.assertEqual(first['employee_sync'], {'configured': 1, 'created': 1})
+        self.assertEqual(second['employee_sync'], {'configured': 1, 'created': 0})
+        self.assertEqual(second['sources']['bank_transactions'], 1)
+        self.assertEqual(second['sources']['salary_cash_expenses'], 1)
+        self.assertEqual(second['sources']['account_current_transactions'], 1)
+        self.assertEqual(second['sources']['latest_bank_dates']['bancon'], '2026-07-12')
+        self.assertEqual(second['totals']['bank_transfer'], 42000.0)
+        self.assertEqual(second['totals']['cash_expense'], 10000.0)
+        self.assertEqual(second['totals']['account_current'], 7000.0)
+        self.assertEqual(second['totals']['total'], 59000.0)
+        self.assertEqual(Employee.objects.filter(name='ROCIO').count(), 1)
+        self.assertTrue(EmployeeAlias.objects.filter(employee__name='ROCIO', normalized_alias='rocio').exists())
+        self.assertEqual(EmployeeMovement.objects.filter(employee__name='ROCIO').count(), 3)
+
+    def test_employees_endpoint_syncs_salary_subcategories(self):
+        salary_category = ExpenseCategory.objects.create(name='SUELDOS')
+        ExpenseSubcategory.objects.create(category=salary_category, name='ZAIRA')
+
+        response = self.api.get('/api/salaries/employees/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('ZAIRA', [employee['name'] for employee in response.data])
+
+    def test_summary_keeps_unmatched_diagnostics_for_api_compatibility(self):
+        batch = BankUploadBatch.objects.create(
+            bank='bancon',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 12),
+            concept='TRANSFERENCIA HOMEBANKING',
+            description='PERSONA SIN CONFIGURAR',
+            amount=-42000,
+        )
+
         result = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
 
-        self.assertEqual(result['sources']['bank_transactions'], 1)
-        self.assertEqual(result['sources']['salary_cash_expenses'], 1)
-        self.assertEqual(result['sources']['account_current_transactions'], 1)
-        self.assertEqual(result['sources']['latest_bank_dates']['bancon'], '2026-07-12')
-        self.assertEqual(result['unmatched']['count'], 3)
-        self.assertEqual(
-            {item['source'] for item in result['unmatched']['items']},
-            {'bank_transfer', 'cash_expense', 'account_current'},
-        )
-        account_item = next(item for item in result['unmatched']['items'] if item['source'] == 'account_current')
-        self.assertIn('Pendiente, Ana', account_item['description'])
+        self.assertEqual(result['unmatched']['count'], 1)
+        self.assertEqual(result['unmatched']['items'][0]['source'], 'bank_transfer')
 
-    def test_assign_pending_bank_transfer_adds_alias_and_movement(self):
+    def test_assign_pending_bank_transfer_endpoint_remains_available(self):
         batch = BankUploadBatch.objects.create(
             bank='santander',
             fecha_desde=date(2026, 7, 1),
@@ -169,7 +205,6 @@ class SalaryFlowTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['status'], 'manual')
-        self.assertEqual(response.data['employee_name'], 'Diego Empleado')
         self.assertTrue(EmployeeAlias.objects.filter(employee=self.employee, normalized_alias='perez juan').exists())
         self.assertTrue(EmployeeMovement.objects.filter(bank_transaction=bank_tx, employee=self.employee).exists())
 

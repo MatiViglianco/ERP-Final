@@ -25,8 +25,6 @@ import {
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance'
 import BadgeIcon from '@mui/icons-material/Badge'
 import LocalAtmIcon from '@mui/icons-material/LocalAtm'
-import LinkIcon from '@mui/icons-material/Link'
-import PersonAddIcon from '@mui/icons-material/PersonAdd'
 import PointOfSaleIcon from '@mui/icons-material/PointOfSale'
 import SyncIcon from '@mui/icons-material/Sync'
 import { useAuth } from '../context/AuthContext.jsx'
@@ -34,7 +32,6 @@ import { API_BASE } from '../config'
 
 const API_SALARIES_SUMMARY = `${API_BASE}/salaries/summary/`
 const API_EMPLOYEES = `${API_BASE}/salaries/employees/`
-const API_ASSIGN_MOVEMENT = `${API_BASE}/salaries/movements/assign/`
 const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 
 const MONTHS = [
@@ -97,7 +94,6 @@ export default function SalariesPage() {
   const [actionLoading, setActionLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  const [candidateEmployees, setCandidateEmployees] = useState({})
   const [employeeForm, setEmployeeForm] = useState({
     name: '',
     aliases: '',
@@ -178,55 +174,10 @@ export default function SalariesPage() {
     }
   }
 
-  const prepareEmployee = (candidate) => {
-    const accountClient = clients.find((client) => client.id === candidate.account_client_id) || null
-    setEmployeeForm({
-      name: candidate.suggested_name || '',
-      aliases: candidate.suggested_alias || '',
-      accountClient,
-    })
-    setSuccess('Datos preparados. Revisa el nombre y presiona Crear.')
-    document.getElementById('employee-setup')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-
-  const assignCandidate = async (candidate) => {
-    const employeeId = candidateEmployees[`${candidate.source}:${candidate.source_id}`]
-    if (!employeeId) return
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_ASSIGN_MOVEMENT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          employee_id: employeeId,
-          source: candidate.source,
-          source_id: candidate.source_id,
-          alias: candidate.suggested_alias || '',
-        }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo asignar el movimiento')
-      setSuccess(`Movimiento asignado a ${data.employee_name}`)
-      setCandidateEmployees((prev) => {
-        const next = { ...prev }
-        delete next[`${candidate.source}:${candidate.source_id}`]
-        return next
-      })
-      await Promise.all([fetchEmployees(), fetchSummary()])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
   const totals = summary?.totals || {}
   const movements = summary?.movements || []
   const employeeRows = summary?.employees || []
   const sources = summary?.sources || {}
-  const unmatched = summary?.unmatched || { count: 0, counts: {}, items: [] }
   const latestBankDates = sources.latest_bank_dates || {}
 
   return (
@@ -274,12 +225,6 @@ export default function SalariesPage() {
           No hay movimientos bancarios importados en este periodo. Ultimos datos: Santander {formatDate(latestBankDates.santander)} y Bancor {formatDate(latestBankDates.bancon)}.
         </Alert>
       )}
-      {summary && unmatched.count > 0 && (
-        <Alert severity="warning">
-          Hay {unmatched.count} movimientos pendientes de identificar. Asigna solamente los que correspondan a empleados.
-        </Alert>
-      )}
-
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
         <SummaryCard icon={<BadgeIcon color="primary" />} label="Total empleados" value={totals.total} detail={`${employeeRows.length} empleados con movimientos`} />
         <SummaryCard icon={<AccountBalanceIcon color="info" />} label="Transferencias" value={totals.bank_transfer} detail="Egresos detectados en bancos" />
@@ -287,130 +232,7 @@ export default function SalariesPage() {
         <SummaryCard icon={<PointOfSaleIcon color="warning" />} label="Cuenta corriente" value={totals.account_current} detail="Retiros o vales vinculados" />
       </Box>
 
-      {unmatched.count > 0 && (
-        <Card>
-          <CardContent>
-            <Typography variant="h6" fontWeight={700}>Pendientes de identificar</Typography>
-            <Typography variant="body2" color="text.secondary">
-              Transferencias, gastos en Sueldos y consumos de cuenta corriente que todavia no tienen empleado asociado.
-            </Typography>
-            <Divider sx={{ my: 2 }} />
-            <Box sx={{ display: { xs: 'block', md: 'none' } }}>
-              {(unmatched.items || []).map((candidate) => {
-                const candidateKey = `${candidate.source}:${candidate.source_id}`
-                return (
-                  <Stack key={candidateKey} spacing={1.5} sx={{ py: 2, borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
-                      <Typography variant="body2" fontWeight={700}>{formatDate(candidate.date)}</Typography>
-                      <Chip size="small" color={SOURCE_COLORS[candidate.source] || 'default'} label={candidate.source_label} />
-                    </Stack>
-                    <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{candidate.description}</Typography>
-                    <Typography fontWeight={800}>{formatCurrency(candidate.amount)}</Typography>
-                    {employees.length ? (
-                      <Stack spacing={1}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Empleado</InputLabel>
-                          <Select
-                            label="Empleado"
-                            value={candidateEmployees[candidateKey] || ''}
-                            onChange={(event) => setCandidateEmployees((prev) => ({ ...prev, [candidateKey]: event.target.value }))}
-                          >
-                            {employees.filter((employee) => employee.active).map((employee) => (
-                              <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                        <Button
-                          fullWidth
-                          variant="outlined"
-                          startIcon={<LinkIcon />}
-                          disabled={actionLoading || !candidateEmployees[candidateKey]}
-                          onClick={() => assignCandidate(candidate)}
-                        >
-                          Asignar
-                        </Button>
-                      </Stack>
-                    ) : (
-                      <Button fullWidth variant="outlined" startIcon={<PersonAddIcon />} onClick={() => prepareEmployee(candidate)}>
-                        Preparar alta
-                      </Button>
-                    )}
-                  </Stack>
-                )
-              })}
-            </Box>
-            <Box sx={{ display: { xs: 'none', md: 'block' }, overflowX: 'auto' }}>
-              <Table size="small" sx={{ minWidth: 860 }}>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Fecha</TableCell>
-                    <TableCell>Origen</TableCell>
-                    <TableCell>Detalle</TableCell>
-                    <TableCell align="right">Importe</TableCell>
-                    <TableCell>Empleado</TableCell>
-                    <TableCell align="right">Accion</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {(unmatched.items || []).map((candidate) => {
-                    const candidateKey = `${candidate.source}:${candidate.source_id}`
-                    return (
-                      <TableRow key={candidateKey}>
-                        <TableCell>{formatDate(candidate.date)}</TableCell>
-                        <TableCell>
-                          <Chip size="small" color={SOURCE_COLORS[candidate.source] || 'default'} label={candidate.source_label} />
-                        </TableCell>
-                        <TableCell>{candidate.description}</TableCell>
-                        <TableCell align="right">{formatCurrency(candidate.amount)}</TableCell>
-                        <TableCell sx={{ minWidth: 210 }}>
-                          {employees.length ? (
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Empleado</InputLabel>
-                              <Select
-                                label="Empleado"
-                                value={candidateEmployees[candidateKey] || ''}
-                                onChange={(event) => setCandidateEmployees((prev) => ({ ...prev, [candidateKey]: event.target.value }))}
-                              >
-                                {employees.filter((employee) => employee.active).map((employee) => (
-                                  <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          ) : (
-                            <Typography variant="body2" color="text.secondary">Primero crea el empleado</Typography>
-                          )}
-                        </TableCell>
-                        <TableCell align="right">
-                          {employees.length ? (
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              startIcon={<LinkIcon />}
-                              disabled={actionLoading || !candidateEmployees[candidateKey]}
-                              onClick={() => assignCandidate(candidate)}
-                            >
-                              Asignar
-                            </Button>
-                          ) : (
-                            <Button size="small" variant="outlined" startIcon={<PersonAddIcon />} onClick={() => prepareEmployee(candidate)}>
-                              Preparar alta
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            </Box>
-            {unmatched.truncated && (
-              <Typography variant="caption" color="text.secondary">Se muestran los primeros 100 pendientes.</Typography>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      <Card id="employee-setup">
+      <Card>
         <CardContent>
           <Stack spacing={2}>
             <Box>

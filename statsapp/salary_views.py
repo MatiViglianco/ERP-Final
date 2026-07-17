@@ -10,6 +10,7 @@ from .salary_services import (
     assign_employee_movement,
     create_employee,
     employee_payload,
+    ensure_salary_category_employees,
     ensure_employee_alias,
     month_range,
     movement_payload,
@@ -29,6 +30,7 @@ def salaries_dashboard(request):
 @permission_classes([IsAdminUser])
 def employees_list(request):
     if request.method == 'GET':
+        ensure_salary_category_employees()
         employees = Employee.objects.select_related('account_client').prefetch_related('aliases').order_by('name')
         return Response([employee_payload(employee) for employee in employees])
 
