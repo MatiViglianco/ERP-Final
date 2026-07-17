@@ -143,6 +143,8 @@ class SalaryFlowTests(TestCase):
             {item['source'] for item in result['unmatched']['items']},
             {'bank_transfer', 'cash_expense', 'account_current'},
         )
+        account_item = next(item for item in result['unmatched']['items'] if item['source'] == 'account_current')
+        self.assertIn('Pendiente, Ana', account_item['description'])
 
     def test_assign_pending_bank_transfer_adds_alias_and_movement(self):
         batch = BankUploadBatch.objects.create(

@@ -159,7 +159,7 @@ def _salary_source_diagnostics(start_date, end_date, limit=100):
             'source_id': tx.external_id,
             'date': tx.date.isoformat() if tx.date else None,
             'amount': float(tx.original_amount or 0),
-            'description': f"Cuenta corriente: {tx.description or tx.external_id}",
+            'description': f"Cuenta corriente - {client_name}: {tx.description or tx.external_id}",
             'suggested_name': client_name,
             'suggested_alias': client_name,
             'account_client_id': str(tx.client_id),

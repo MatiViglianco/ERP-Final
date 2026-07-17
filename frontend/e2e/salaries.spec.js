@@ -19,7 +19,7 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
   await expect(page.getByText('Cuenta corriente: Retiro cuenta corriente empleado')).toBeVisible()
   await expect(page.getByRole('heading', { name: '$ 69.000' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Pendientes de identificar' })).toBeVisible()
-  await expect(page.getByRole('cell', { name: 'Cuenta corriente: Venta E2E cuenta corriente' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: 'Cuenta corriente - Facturacion, Cliente: Venta E2E cuenta corriente' })).toBeVisible()
   const transferRow = page.getByRole('row').filter({ hasText: 'PEREZ JUAN PRUEBA' })
   await expect(transferRow).toBeVisible()
   await transferRow.getByRole('combobox').click()
