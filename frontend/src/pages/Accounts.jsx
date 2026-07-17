@@ -38,8 +38,10 @@ import SearchIcon from '@mui/icons-material/Search'
 import WhatsAppIcon from '@mui/icons-material/WhatsApp'
 import InsightsIcon from '@mui/icons-material/Insights'
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline'
+import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
+import useBranches from '../hooks/useBranches.js'
 
 const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 const API_ACCOUNT_DETAIL = (id) => `${API_BASE}/accounts/clients/${id}/`
@@ -171,6 +173,8 @@ function initials(name) {
 
 export default function AccountsPage() {
   const { authFetch } = useAuth()
+  const [searchParams] = useSearchParams()
+  const { branches, branchesError } = useBranches(authFetch)
   const [clients, setClients] = useState([])
   const [clientCount, setClientCount] = useState(0)
   const [clientPage, setClientPage] = useState(0)
@@ -179,6 +183,7 @@ export default function AccountsPage() {
   const [search, setSearch] = useState('')
   const [ordering, setOrdering] = useState('last_name')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [branchId, setBranchId] = useState(searchParams.get('branch_id') || '')
 
   const [selectedId, setSelectedId] = useState(null)
   const [detail, setDetail] = useState(null)
@@ -217,6 +222,10 @@ export default function AccountsPage() {
   const [newExpenseLoading, setNewExpenseLoading] = useState(false)
   const [whatsappLoadingId, setWhatsappLoadingId] = useState(null)
 
+  useEffect(() => {
+    setBranchId(searchParams.get('branch_id') || '')
+  }, [searchParams])
+
   const fetchClients = useCallback(async () => {
     setClientsLoading(true)
     setClientError('')
@@ -227,6 +236,7 @@ export default function AccountsPage() {
         ordering,
       })
       if (search.trim()) params.set('search', search.trim())
+      if (branchId) params.set('branch_id', branchId)
       const resp = await authFetch(`${API_ACCOUNTS}?${params.toString()}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo cargar la lista')
@@ -242,7 +252,7 @@ export default function AccountsPage() {
     } finally {
       setClientsLoading(false)
     }
-  }, [authFetch, clientPage, ordering, search, selectedId])
+  }, [authFetch, clientPage, ordering, search, selectedId, branchId])
 
   useEffect(() => {
     fetchClients()
@@ -260,6 +270,7 @@ export default function AccountsPage() {
         limit: String(TX_FETCH_LIMIT),
         offset: '0',
       })
+      if (branchId) params.set('branch_id', branchId)
       const resp = await authFetch(`${API_ACCOUNT_DETAIL(selectedId)}?${params.toString()}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo obtener el detalle')
@@ -274,7 +285,7 @@ export default function AccountsPage() {
     } finally {
       setDetailLoading(false)
     }
-  }, [authFetch, selectedId])
+  }, [authFetch, selectedId, branchId])
 
   useEffect(() => {
     fetchDetail()
@@ -287,6 +298,12 @@ export default function AccountsPage() {
   useEffect(() => {
     setTxPage(0)
   }, [statusFilter])
+
+  useEffect(() => {
+    setClientPage(0)
+    setTxPage(0)
+    setSelectedTransactions(new Set())
+  }, [branchId])
 
   const selectedClient = detail?.client
   const transactions = detail?.transactions || []
@@ -540,13 +557,14 @@ export default function AccountsPage() {
 
   const executePayment = async (payload) => {
     if (!selectedId) return
+    const requestPayload = branchId ? { ...payload, branch_id: branchId } : payload
     setActionError('')
     setActionLoading(true)
     try {
       const resp = await authFetch(API_ACCOUNT_PAY(selectedId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(requestPayload),
       })
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) throw new Error(data.detail || 'No se pudo registrar el pago')
@@ -633,6 +651,7 @@ const handleWhatsappMessage = async (client) => {
     setWhatsappLoadingId(client.id)
     try {
       const params = new URLSearchParams({ limit: '500', offset: '0' })
+      if (branchId) params.set('branch_id', branchId)
       const resp = await authFetch(`${API_ACCOUNT_DETAIL(client.id)}?${params.toString()}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo obtener el detalle para WhatsApp')
@@ -726,6 +745,7 @@ const handleWhatsappMessage = async (client) => {
         date: newExpenseForm.date,
         amount: amountNumber,
       }
+      if (branchId) payload.branch_id = branchId
       const cleanDescription = (newExpenseForm.description || '').trim()
       if (cleanDescription) payload.description = cleanDescription
       const resp = await authFetch(API_ACCOUNT_TX_CREATE(selectedId), {
@@ -811,6 +831,7 @@ const handleWhatsappMessage = async (client) => {
       if (filters.year) params.set('year', filters.year)
       if (filters.month) params.set('month', filters.month)
       if (filters.day) params.set('day', filters.day)
+      if (branchId) params.set('branch_id', branchId)
       const resp = await authFetch(`${API_ACCOUNT_STATS}?${params.toString()}`)
       const data = await resp.json().catch(() => ({}))
       if (!resp.ok) throw new Error(data?.detail || 'No se pudieron obtener las estadísticas')
@@ -831,7 +852,7 @@ const handleWhatsappMessage = async (client) => {
     } finally {
       setStatsLoading(false)
     }
-  }, [authFetch, statsFilters])
+  }, [authFetch, statsFilters, branchId])
 
   const openStatsDialog = () => {
     setStatsDialogOpen(true)
@@ -900,6 +921,19 @@ const handleWhatsappMessage = async (client) => {
                 )
               }}
             />
+            <TextField
+              select
+              size="small"
+              label="Sucursal"
+              value={branchId}
+              onChange={(e) => setBranchId(e.target.value)}
+              SelectProps={{ native: true }}
+            >
+              <option value="">Todas</option>
+              {branches.map((branch) => (
+                <option key={branch.id} value={String(branch.id)}>{branch.name}</option>
+              ))}
+            </TextField>
             <ToggleButtonGroup
               exclusive
               size="small"
@@ -909,6 +943,7 @@ const handleWhatsappMessage = async (client) => {
               <ToggleButton value="last_name">Ordenar por apellido</ToggleButton>
               <ToggleButton value="debt">Ordenar por deuda</ToggleButton>
             </ToggleButtonGroup>
+            {branchesError && <Alert severity="warning">{branchesError}</Alert>}
             {clientError && <Alert severity="error">{clientError}</Alert>}
             {clientsLoading && <LinearProgress />}
             <Stack spacing={0.75} sx={{ flexGrow: 1, minHeight: { xs: 0, md: 520 }, overflowY: 'auto', pr: 1 }}>
@@ -934,7 +969,7 @@ const handleWhatsappMessage = async (client) => {
                       <Typography sx={{ fontWeight: 600, fontSize: '0.95rem' }}>{client.full_name}</Typography>
                       <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mt: 0.25 }}>
                         <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.2 }}>
-                          Deuda: {formatCurrency(client.total_debt)}
+                          Deuda: {formatCurrency(branchId ? client.branch_total_debt : client.total_debt)}
                         </Typography>
                         <Chip
                           size="small"

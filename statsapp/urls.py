@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    branches,
     upload_csv,
     stats,
     list_filters,
@@ -40,8 +41,27 @@ from .vales_views import (
     vales_lotes,
     vales_lote_detail,
 )
+from .fiscal_views import (
+    account_invoice_create_view,
+    account_invoice_preview_view,
+    billing_dashboard,
+    getnet_import,
+    getnet_terminal_detail,
+    getnet_terminals,
+    getnet_webhook,
+    invoice_authorize,
+    invoice_detail,
+    invoices_list,
+    payments_list,
+)
+from .salary_views import (
+    employee_detail,
+    employees_list,
+    salaries_dashboard,
+)
 
 urlpatterns = [
+    path('branches/', branches, name='branches'),
     path('upload/', upload_csv, name='upload_csv'),
     path('stats/', stats, name='stats'),
     path('filters/', list_filters, name='filters'),
@@ -77,4 +97,18 @@ urlpatterns = [
     path('vales/lotes/', vales_lotes, name='vales_lotes'),
     path('vales/lotes/<str:lote_id>/', vales_lote_detail, name='vales_lote_detail'),
     path('vales/items/<int:item_id>/resolver/', vales_item_resolver, name='vales_item_resolver'),
+    path('billing/summary/', billing_dashboard, name='billing_summary'),
+    path('billing/invoices/', invoices_list, name='billing_invoices'),
+    path('billing/invoices/<uuid:pk>/', invoice_detail, name='billing_invoice_detail'),
+    path('billing/invoices/<uuid:pk>/authorize/', invoice_authorize, name='billing_invoice_authorize'),
+    path('billing/accounts/<uuid:pk>/preview/', account_invoice_preview_view, name='billing_account_preview'),
+    path('billing/accounts/<uuid:pk>/invoices/', account_invoice_create_view, name='billing_account_invoice_create'),
+    path('billing/payments/', payments_list, name='billing_payments'),
+    path('billing/getnet/import/', getnet_import, name='billing_getnet_import'),
+    path('billing/getnet/terminals/', getnet_terminals, name='billing_getnet_terminals'),
+    path('billing/getnet/terminals/<int:pk>/', getnet_terminal_detail, name='billing_getnet_terminal_detail'),
+    path('billing/getnet/webhook/', getnet_webhook, name='billing_getnet_webhook'),
+    path('salaries/summary/', salaries_dashboard, name='salaries_summary'),
+    path('salaries/employees/', employees_list, name='salaries_employees'),
+    path('salaries/employees/<uuid:pk>/', employee_detail, name='salaries_employee_detail'),
 ]

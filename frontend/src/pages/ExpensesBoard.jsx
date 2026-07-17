@@ -34,6 +34,7 @@ import { Bar, Doughnut } from 'react-chartjs-2'
 import { Chart, ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
+import useBranches from '../hooks/useBranches.js'
 import EditIcon from '@mui/icons-material/Edit'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import InsightsIcon from '@mui/icons-material/Insights'
@@ -498,6 +499,7 @@ const useBankExpenses = (authFetch) => {
 
 export default function ExpensesBoard() {
   const { authFetch } = useAuth()
+  const { branches, branchesError } = useBranches(authFetch)
   const theme = useTheme()
   const isMobile = useMediaQuery(theme.breakpoints.down('md'))
   const ROWS_PER_PAGE = 50
@@ -533,6 +535,7 @@ export default function ExpensesBoard() {
   const [statsYearFilter, setStatsYearFilter] = useState(currentYear)
   const [statsMonthFilter, setStatsMonthFilter] = useState('')
   const [statsSelectedCategory, setStatsSelectedCategory] = useState('')
+  const [branchId, setBranchId] = useState('')
   const categoryChartRef = useRef(null)
 
   useEffect(() => {
@@ -608,7 +611,7 @@ export default function ExpensesBoard() {
         await migrateLegacyData()
 
         const [expensesResponse, categoriesResponse, assignmentsResponse] = await Promise.all([
-          authFetch(API_EXPENSES),
+          authFetch(branchId ? `${API_EXPENSES}?branch_id=${branchId}` : API_EXPENSES),
           authFetch(API_EXPENSE_CATEGORIES),
           authFetch(API_EXPENSE_ASSIGNMENTS),
         ])
@@ -656,7 +659,7 @@ export default function ExpensesBoard() {
 
     loadExpensesData()
     return () => { active = false }
-  }, [authFetch])
+  }, [authFetch, branchId])
 
   useEffect(() => {
     setPage(0)
@@ -668,7 +671,7 @@ export default function ExpensesBoard() {
   )
 
   const combinedExpenses = useMemo(() => {
-    const combined = [...bankExpenses, ...expenses]
+    const combined = [...(branchId ? [] : bankExpenses), ...expenses]
     const getSortValue = (expense) => {
       if (typeof expense.sortTimestamp === 'number') return expense.sortTimestamp
       if (expense.date) {
@@ -678,7 +681,7 @@ export default function ExpensesBoard() {
       return 0
     }
     return combined.sort((a, b) => getSortValue(b) - getSortValue(a))
-  }, [bankExpenses, expenses])
+  }, [bankExpenses, expenses, branchId])
 
   const normalizedExpenses = useMemo(() => combinedExpenses.map((expense) => {
     const isBank = expense.source === 'bank'
@@ -1041,6 +1044,7 @@ export default function ExpensesBoard() {
       subcategory: newEntry.subcategory,
       description: 'Sin descripcion',
       source: 'manual',
+      branch_id: branchId || undefined,
     }
     try {
       const response = await authFetch(API_EXPENSES, {
@@ -1277,22 +1281,34 @@ export default function ExpensesBoard() {
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Typography variant="h4" sx={{ fontWeight: 700 }}>Gastos y categorias</Typography>
-        <Button
-          variant="contained"
-          startIcon={<InsightsIcon />}
-          onClick={() => setStatsOpen(true)}
-          sx={{
-            backgroundColor: '#29b6f6',
-            color: '#021019',
-            fontWeight: 700,
-            px: 3,
-            borderRadius: 2,
-            '&:hover': { backgroundColor: '#1aa8e8' },
-          }}
-        >
-          ESTADISTICAS
-        </Button>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+          <FormControl size="small" sx={{ minWidth: 180 }}>
+            <InputLabel id="expenses-branch">Sucursal</InputLabel>
+            <Select labelId="expenses-branch" label="Sucursal" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+              <MenuItem value="">Todas</MenuItem>
+              {branches.map((branch) => (
+                <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Button
+            variant="contained"
+            startIcon={<InsightsIcon />}
+            onClick={() => setStatsOpen(true)}
+            sx={{
+              backgroundColor: '#29b6f6',
+              color: '#021019',
+              fontWeight: 700,
+              px: 3,
+              borderRadius: 2,
+              '&:hover': { backgroundColor: '#1aa8e8' },
+            }}
+          >
+            ESTADISTICAS
+          </Button>
+        </Stack>
       </Stack>
+      {branchesError && <Alert severity="warning">{branchesError}</Alert>}
 
       <Card sx={{ borderRadius: 3, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(12,12,18,0.9)' }}>
         <CardContent>

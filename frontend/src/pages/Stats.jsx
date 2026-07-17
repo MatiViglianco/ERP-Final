@@ -5,6 +5,7 @@ import { Chart, ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Leg
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
+import useBranches from '../hooks/useBranches.js'
 import CloseIcon from '@mui/icons-material/Close'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import DownloadIcon from '@mui/icons-material/Download'
@@ -123,7 +124,9 @@ export default function StatsPage() {
   const [params] = useSearchParams()
   const paramsKey = params.toString()
   const { authFetch } = useAuth()
+  const { branches, branchesError } = useBranches(authFetch)
   const batchId = params.get('batch_id') || ''
+  const branchParam = params.get('branch_id') || ''
   const rangeParam = params.get('range') || ''
   const startParam = params.get('fecha_desde') || ''
   const endParam = params.get('fecha_hasta') || ''
@@ -154,6 +157,7 @@ export default function StatsPage() {
   })
   const [fSeccion, setFSeccion] = useState('')
   const [selectedSection, setSelectedSection] = useState('')
+  const [branchId, setBranchId] = useState(branchParam)
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -191,6 +195,7 @@ export default function StatsPage() {
     } else if (urlRange === 'year') {
       setRangeMode('year')
     }
+    setBranchId(params.get('branch_id') || '')
   }, [paramsKey])
 
   useEffect(() => {
@@ -252,6 +257,7 @@ export default function StatsPage() {
     if (range.start) search.set('fecha_desde', range.start)
     if (range.end) search.set('fecha_hasta', range.end)
     if (fSeccion) search.set('seccion', fSeccion)
+    if (branchId) search.set('branch_id', branchId)
     try {
       const resp = await authFetch(`${API.stats}?${search.toString()}`, { signal: controller.signal })
       const data = await resp.json().catch(() => ({}))
@@ -274,7 +280,7 @@ export default function StatsPage() {
         statsAbortRef.current = null
       }
     }
-  }, [batchId, buildRangeParams, fSeccion, authFetch, rangeMode, variosDias, month])
+  }, [batchId, buildRangeParams, fSeccion, authFetch, rangeMode, variosDias, month, branchId])
 
   useEffect(() => {
     fetchStats()
@@ -388,6 +394,7 @@ export default function StatsPage() {
     if (range.start) search.set('fecha_desde', range.start)
     if (range.end) search.set('fecha_hasta', range.end)
     if (fSeccion) search.set('seccion', fSeccion)
+    if (branchId) search.set('branch_id', branchId)
     try {
       const resp = await authFetch(`${API.productTrend}?${search.toString()}`)
       const data = await resp.json()
@@ -398,7 +405,7 @@ export default function StatsPage() {
     } finally {
       setTrendLoading(false)
     }
-  }, [batchId, fSeccion, buildRangeParams, authFetch, rangeMode, variosDias, month])
+  }, [batchId, fSeccion, buildRangeParams, authFetch, rangeMode, variosDias, month, branchId])
   const closeTrend = useCallback(() => {
     setTrendOpen(false)
     setProductTrend(null)
@@ -555,6 +562,18 @@ export default function StatsPage() {
               </FormControl>
             </Box>
 
+            <Box>
+              <FormControl fullWidth>
+                <InputLabel id="stats-branch">Sucursal</InputLabel>
+                <Select labelId="stats-branch" label="Sucursal" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+                  <MenuItem value="">Todas las sucursales</MenuItem>
+                  {branches.map((branch) => (
+                    <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+
             {rangeMode === 'year' && (
               <Box>
                 <TextField
@@ -626,6 +645,7 @@ export default function StatsPage() {
 
             {loading && <Box><LinearProgress /></Box>}
             {error && <Box><Alert severity="error">{error}</Alert></Box>}
+            {branchesError && <Box><Alert severity="warning">{branchesError}</Alert></Box>}
           </Box>
         </CardContent>
       </Card>
@@ -667,7 +687,7 @@ export default function StatsPage() {
               lg: showUnitsCard ? 'repeat(4, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))'
             }
           }}>
-            <Card>
+            <Card data-testid="stats-total-amount">
               <CardContent>
                 <Typography variant="body2" color="text.secondary">Importe total</Typography>
                 <Typography variant="h5" sx={{ fontWeight: 700 }}>$ {formattedTotal}</Typography>

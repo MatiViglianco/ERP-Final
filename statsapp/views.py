@@ -16,6 +16,7 @@ from rest_framework import status
 
 from .utils import parse_csv_and_aggregate, parse_csv_rows, _to_float, aggregate_rows, _parse_units, parse_santander_csv, parse_bancon_file
 from .models import (
+    Branch,
     UploadBatch,
     Record,
     BankUploadBatch,
@@ -28,6 +29,7 @@ from .models import (
     ExpenseEntry,
     BankExpenseAssignment,
 )
+from .text_utils import normalize_search_text
 
 SPANISH_MONTHS = [
     'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
@@ -37,6 +39,58 @@ SPANISH_MONTHS = [
 SPANISH_WEEKDAYS = [
     'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'
 ]
+
+
+def _serialize_branch(branch):
+    if not branch:
+        return None
+    return {
+        'id': branch.id,
+        'name': branch.name,
+        'slug': branch.slug,
+        'active': branch.active,
+    }
+
+
+def _parse_branch_from_request(request):
+    data = getattr(request, 'data', {}) or {}
+    post = getattr(request, 'POST', {}) or {}
+    query = getattr(request, 'query_params', None) or getattr(request, 'GET', {}) or {}
+    branch_id = post.get('branch_id') or data.get('branch_id') or query.get('branch_id')
+    branch_name = post.get('branch_name') or data.get('branch_name') or query.get('branch_name')
+    if branch_id:
+        return Branch.objects.filter(pk=branch_id, active=True).first()
+    if branch_name:
+        cleaned = str(branch_name).strip()
+        if cleaned:
+            slug = normalize_search_text(cleaned).replace(' ', '-')
+            branch, _ = Branch.objects.get_or_create(slug=slug, defaults={'name': cleaned})
+            return branch
+    return None
+
+
+def _branch_id_from_params(params):
+    branch_id = (params.get('branch_id') or '').strip()
+    return branch_id if branch_id and branch_id.lower() != 'all' else None
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def branches(request):
+    if request.method == 'POST':
+        data = request.data or {}
+        name = (data.get('name') or '').strip()
+        if len(name) < 2:
+            return Response({'detail': 'Nombre de sucursal requerido'}, status=status.HTTP_400_BAD_REQUEST)
+        slug = (data.get('slug') or normalize_search_text(name).replace(' ', '-')).strip('-')
+        branch, created = Branch.objects.get_or_create(slug=slug, defaults={'name': name})
+        if not created and branch.name != name:
+            branch.name = name
+            branch.active = True
+            branch.save(update_fields=['name', 'active', 'updated_at'])
+        return Response(_serialize_branch(branch), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+    qs = Branch.objects.filter(active=True).order_by('name')
+    return Response([_serialize_branch(branch) for branch in qs])
 
 def _format_spanish_month(date_obj):
     return f"{SPANISH_MONTHS[date_obj.month - 1]} de {date_obj.year}".capitalize()
@@ -56,6 +110,7 @@ def upload_csv(request):
 
     truthy = {'1', 'true', 'on', 'yes', 'si', 'sí', 's'}
     overwrite_requested = (request.POST.get('overwrite') or '').strip().lower() in truthy
+    branch = _parse_branch_from_request(request)
 
     try:
         rows = parse_csv_rows(f.file)
@@ -101,6 +156,7 @@ def upload_csv(request):
 
         if conflict_q is not None:
             conflicts = UploadBatch.objects.filter(conflict_q)
+            conflicts = conflicts.filter(branch=branch) if branch else conflicts.filter(branch__isnull=True)
             if conflicts.exists():
                 if not overwrite_requested:
                     conflict_info = [
@@ -109,6 +165,7 @@ def upload_csv(request):
                             'fecha': b.single_date.isoformat() if b.single_date else None,
                             'desde': b.fecha_desde.isoformat() if b.fecha_desde else None,
                             'hasta': b.fecha_hasta.isoformat() if b.fecha_hasta else None,
+                            'branch': _serialize_branch(b.branch),
                         }
                         for b in conflicts
                     ]
@@ -124,6 +181,7 @@ def upload_csv(request):
 
         batch = UploadBatch.objects.create(
             original_filename=getattr(f, 'name', ''),
+            branch=branch,
             fecha_desde=None if is_single else fecha_desde,
             fecha_hasta=None if is_single else fecha_hasta,
             single_date=single_date_final,
@@ -155,6 +213,7 @@ def upload_csv(request):
             'fecha': single_date_final.isoformat() if single_date_final else None,
             'desde': fecha_desde.isoformat() if fecha_desde and not is_single else None,
             'hasta': fecha_hasta.isoformat() if fecha_hasta and not is_single else None,
+            'branch': _serialize_branch(branch),
         }
         data['batch_id'] = batch.id
         return Response(data)
@@ -170,6 +229,7 @@ def _filter_qs(params):
     producto = params.get('producto')
     only_today = (params.get('only_today') or '').lower() in ['1', 'true', 'on', 'yes', 'si', 'sí']
     batch_id = params.get('batch_id')
+    branch_id = _branch_id_from_params(params)
 
     def to_date(s):
         try:
@@ -197,6 +257,8 @@ def _filter_qs(params):
         elif hasta:
             q &= (Q(batch__single_date__lte=hasta) | Q(batch__fecha_desde__lte=hasta))
         qs = qs.filter(q)
+    if branch_id:
+        qs = qs.filter(batch__branch_id=branch_id)
 
     if seccion:
         qs = qs.filter(dsc_seccion=seccion)
@@ -288,7 +350,11 @@ def list_filters(request):
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def list_batches(request):
-    batches = UploadBatch.objects.order_by('-created_at')[:100]
+    batches = UploadBatch.objects.select_related('branch')
+    branch_id = _branch_id_from_params(request.query_params)
+    if branch_id:
+        batches = batches.filter(branch_id=branch_id)
+    batches = batches.order_by('-created_at')[:100]
     def to_dict(b):
         return {
             'id': b.id,
@@ -299,6 +365,7 @@ def list_batches(request):
             'hasta': b.fecha_hasta.isoformat() if b.fecha_hasta else None,
             'is_single_day': b.is_single_day,
             'is_only_today': b.is_only_today,
+            'branch': _serialize_branch(b.branch),
         }
     return Response([to_dict(b) for b in batches])
 
@@ -306,18 +373,20 @@ def list_batches(request):
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def sales_daily(request):
+    branch_id = _branch_id_from_params(request.query_params)
     qs = Record.objects.select_related('batch').annotate(
         day=Coalesce('batch__single_date', 'batch__fecha_desde', 'batch__fecha_hasta'),
     ).exclude(day__isnull=True)
     batch_id = request.query_params.get('batch_id')
+    if branch_id:
+        qs = qs.filter(batch__branch_id=branch_id)
 
-    all_years = (
-        Record.objects.annotate(day=Coalesce('batch__single_date', 'batch__fecha_desde', 'batch__fecha_hasta'))
-        .exclude(day__isnull=True)
-        .annotate(year=ExtractYear('day'))
-        .values_list('year', flat=True)
-        .distinct()
-    )
+    all_years_qs = Record.objects.annotate(
+        day=Coalesce('batch__single_date', 'batch__fecha_desde', 'batch__fecha_hasta')
+    ).exclude(day__isnull=True)
+    if branch_id:
+        all_years_qs = all_years_qs.filter(batch__branch_id=branch_id)
+    all_years = all_years_qs.annotate(year=ExtractYear('day')).values_list('year', flat=True).distinct()
     available_years = sorted([year for year in all_years if year])
     requested_year = _safe_int(request.query_params.get('year'), None)
     if not requested_year:
@@ -445,6 +514,7 @@ def sales_daily(request):
             'batch_id': batch_id,
             'available_years': available_years,
             'available_months': available_months,
+            'branch_id': branch_id,
         },
         'dataset': dataset_info,
         'stats': stats,
@@ -775,6 +845,7 @@ def _serialize_expense(entry):
     return {
         'id': str(entry.id),
         'external_id': entry.external_id,
+        'branch': _serialize_branch(entry.branch),
         'date': entry.date.isoformat() if entry.date else None,
         'amount': float(entry.amount or 0),
         'method': entry.method,
@@ -798,10 +869,14 @@ def _serialize_expense_categories():
 @permission_classes([IsAdminUser])
 def expenses(request):
     if request.method == 'GET':
-        entries = ExpenseEntry.objects.all().order_by('-date', '-created_at')
+        entries = ExpenseEntry.objects.select_related('branch').all().order_by('-date', '-created_at')
+        branch_id = _branch_id_from_params(request.query_params)
+        if branch_id:
+            entries = entries.filter(branch_id=branch_id)
         return Response([_serialize_expense(entry) for entry in entries])
 
     data = request.data or {}
+    branch = _parse_branch_from_request(request)
     date_value = _parse_client_date(data.get('date'))
     if not date_value:
         return Response({'detail': 'Fecha invalida'}, status=status.HTTP_400_BAD_REQUEST)
@@ -825,6 +900,7 @@ def expenses(request):
             defaults={
                 'date': date_value,
                 'amount': amount,
+                'branch': branch,
                 'method': method,
                 'category': category,
                 'subcategory': subcategory,
@@ -836,6 +912,7 @@ def expenses(request):
     entry = ExpenseEntry.objects.create(
         date=date_value,
         amount=amount,
+        branch=branch,
         method=method,
         category=category,
         subcategory=subcategory,
@@ -882,6 +959,9 @@ def expense_detail(request, pk):
     if 'description' in data:
         entry.description = (data.get('description') or '').strip()
         updated_fields.append('description')
+    if 'branch_id' in data or 'branch_name' in data:
+        entry.branch = _parse_branch_from_request(request)
+        updated_fields.append('branch')
 
     if updated_fields:
         entry.save(update_fields=updated_fields + ['updated_at'])
@@ -982,6 +1062,7 @@ def expenses_import(request):
     categories = data.get('categories') or {}
     expenses = data.get('expenses') or []
     assignments = data.get('assignments') or {}
+    branch = _parse_branch_from_request(request)
 
     created_categories = 0
     created_subcategories = 0
@@ -1029,6 +1110,7 @@ def expenses_import(request):
                     defaults={
                         'date': date_value,
                         'amount': amount,
+                        'branch': branch,
                         'method': method,
                         'category': category,
                         'subcategory': subcategory,
@@ -1043,6 +1125,7 @@ def expenses_import(request):
                 ExpenseEntry.objects.create(
                     date=date_value,
                     amount=amount,
+                    branch=branch,
                     method=method,
                     category=category,
                     subcategory=subcategory,
@@ -1202,8 +1285,9 @@ def _recalc_account_totals(client_ids=None):
         remaining_qs.update(total_debt=Decimal('0'), status=AccountClient.Status.PAID)
 
 
-def _serialize_account_client(client):
+def _serialize_account_client(client, branch_id=None):
     reference_date = client.source_created_at or client.created_at
+    branch_total = getattr(client, 'branch_total_debt', None)
     return {
         'id': str(client.id),
         'external_id': client.external_id,
@@ -1215,6 +1299,7 @@ def _serialize_account_client(client):
         'status': client.status,
         'status_label': client.get_status_display(),
         'total_debt': float(client.total_debt or 0),
+        'branch_total_debt': float(branch_total or 0) if branch_id else None,
     }
 
 
@@ -1224,6 +1309,11 @@ def upload_account_clients(request):
     upload = request.FILES.get('file')
     if not upload:
         return Response({'detail': 'Falta el archivo "file"'}, status=status.HTTP_400_BAD_REQUEST)
+    branch = _parse_branch_from_request(request)
+    branch_supplied = bool(
+        (request.POST.get('branch_id') or '').strip()
+        or (request.POST.get('branch_name') or '').strip()
+    )
 
     try:
         payload = json.load(upload)
@@ -1377,12 +1467,16 @@ def upload_account_clients(request):
                 if obj.payments != payments:
                     obj.payments = payments
                     changed = True
+                if branch_supplied and obj.branch_id != (branch.id if branch else None):
+                    obj.branch = branch
+                    changed = True
                 if changed:
                     tx_to_update.append(obj)
             else:
                 tx_to_create.append(AccountTransaction(
                     external_id=ext_id,
                     client=client,
+                    branch=branch,
                     description=description,
                     status=status_value,
                     date=parsed_date,
@@ -1397,7 +1491,7 @@ def upload_account_clients(request):
         if tx_to_update:
             AccountTransaction.objects.bulk_update(
                 tx_to_update,
-                ['client', 'description', 'status', 'date', 'created_at', 'original_amount', 'paid_amount', 'payments'],
+                ['client', 'branch', 'description', 'status', 'date', 'created_at', 'original_amount', 'paid_amount', 'payments'],
                 batch_size=500,
             )
 
@@ -1413,6 +1507,7 @@ def upload_account_clients(request):
         'transactions_updated': len(tx_to_update),
         'clients_total': len(normalized_clients),
         'transactions_total': len(transactions),
+        'branch': _serialize_branch(branch),
     })
 
 
@@ -1441,10 +1536,29 @@ def list_account_clients(request):
     search = (request.query_params.get('search') or '').strip()
     ordering = (request.query_params.get('ordering') or 'last_name').strip()
     status_filter = request.query_params.get('status')
+    branch_id = _branch_id_from_params(request.query_params)
     limit = min(max(_safe_int(request.query_params.get('limit', 15), 15), 1), 200)
     offset = max(_safe_int(request.query_params.get('offset', 0), 0), 0)
 
     qs = AccountClient.objects.all()
+    if branch_id:
+        pending_expr = ExpressionWrapper(
+            F('transactions__original_amount') - F('transactions__paid_amount'),
+            output_field=DecimalField(max_digits=14, decimal_places=2),
+        )
+        qs = qs.filter(transactions__branch_id=branch_id).annotate(
+            branch_total_debt=Coalesce(Sum(
+                Case(
+                    When(
+                        transactions__branch_id=branch_id,
+                        transactions__original_amount__gt=F('transactions__paid_amount'),
+                        then=pending_expr,
+                    ),
+                    default=Value(Decimal('0')),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                )
+            ), Decimal('0'))
+        ).distinct()
 
     if search:
         tokens = [token for token in search.split() if token]
@@ -1461,17 +1575,20 @@ def list_account_clients(request):
     ordering_map = {
         'last_name': ('last_name', 'first_name'),
         '-last_name': ('-last_name', '-first_name'),
-        'debt': ('-total_debt', 'last_name'),
+        'debt': ('-branch_total_debt', 'last_name') if branch_id else ('-total_debt', 'last_name'),
     }
     qs = qs.order_by(*ordering_map.get(ordering, ordering_map['last_name']))
 
     total = qs.count()
     clients = list(qs[offset:offset + limit])
-    results = [_serialize_account_client(client) for client in clients]
+    results = [_serialize_account_client(client, branch_id=branch_id) for client in clients]
 
     status_counts = {choice.value: 0 for choice in AccountClient.Status}
-    total_clients = AccountClient.objects.count()
-    for row in AccountClient.objects.values('status').annotate(total=Count('id')):
+    counts_qs = AccountClient.objects.all()
+    if branch_id:
+        counts_qs = counts_qs.filter(transactions__branch_id=branch_id).distinct()
+    total_clients = counts_qs.count()
+    for row in counts_qs.values('status').annotate(total=Count('id', distinct=True)):
         status_counts[row['status']] = row['total']
     status_counts['all'] = total_clients
 
@@ -1489,6 +1606,7 @@ def _serialize_transactions(qs):
     for tx in qs:
         data.append({
             'id': tx.external_id,
+            'branch': _serialize_branch(tx.branch),
             'date': tx.date.isoformat() if tx.date else None,
             'description': tx.description or '',
             'original': float(tx.original_amount or 0),
@@ -1501,8 +1619,10 @@ def _serialize_transactions(qs):
     return data
 
 
-def _account_transaction_totals(client):
+def _account_transaction_totals(client, branch_id=None):
     qs = client.transactions.all()
+    if branch_id:
+        qs = qs.filter(branch_id=branch_id)
     totals = qs.aggregate(
         original=Coalesce(Sum('original_amount'), Decimal('0')),
         paid=Coalesce(Sum('paid_amount'), Decimal('0')),
@@ -1532,6 +1652,7 @@ def account_clients_stats(request):
     year = _safe_int(request.query_params.get('year'), None)
     month = _safe_int(request.query_params.get('month'), None)
     day = _safe_int(request.query_params.get('day'), None)
+    branch_id = _branch_id_from_params(request.query_params)
     qs = (
         AccountTransaction.objects
         .select_related('client')
@@ -1548,6 +1669,8 @@ def account_clients_stats(request):
         qs = qs.filter(generated_date__month=month)
     if day:
         qs = qs.filter(generated_date__day=day)
+    if branch_id:
+        qs = qs.filter(branch_id=branch_id)
     qs = qs.order_by('-generated_date', '-created_at')
 
     months = OrderedDict()
@@ -1646,7 +1769,10 @@ def account_client_view(request, pk):
     if request.method == 'GET':
         limit = min(max(_safe_int(request.query_params.get('limit', 30), 30), 1), 5000)
         offset = max(_safe_int(request.query_params.get('offset', 0), 0), 0)
-        qs = client.transactions.order_by('-date', '-created_at', '-id')
+        branch_id = _branch_id_from_params(request.query_params)
+        qs = client.transactions.select_related('branch').order_by('-date', '-created_at', '-id')
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
         total = qs.count()
         page = qs[offset:offset + limit]
 
@@ -1656,7 +1782,7 @@ def account_client_view(request, pk):
             'transactions_total': total,
             'limit': limit,
             'offset': offset,
-            'totals': _account_transaction_totals(client),
+            'totals': _account_transaction_totals(client, branch_id=branch_id),
         })
 
     if request.method == 'PATCH':
@@ -1713,6 +1839,7 @@ def _apply_payment_to_tx(tx, amount, payment_date):
 def account_client_pay(request, pk):
     client = get_object_or_404(AccountClient, pk=pk)
     mode = (request.data.get('mode') or 'selected').lower()
+    branch_id = _branch_id_from_params(request.data) or _branch_id_from_params(request.query_params)
     today = date.today()
     changed_tx_ids = set()
 
@@ -1721,7 +1848,10 @@ def account_client_pay(request, pk):
             tx_ids = request.data.get('transaction_ids') or []
             if not isinstance(tx_ids, list) or not tx_ids:
                 return Response({'detail': 'Debes indicar las transacciones a pagar'}, status=status.HTTP_400_BAD_REQUEST)
-            txs = list(client.transactions.filter(external_id__in=tx_ids))
+            txs_qs = client.transactions.filter(external_id__in=tx_ids)
+            if branch_id:
+                txs_qs = txs_qs.filter(branch_id=branch_id)
+            txs = list(txs_qs)
             if not txs:
                 return Response({'detail': 'No se encontraron las transacciones seleccionadas'}, status=status.HTTP_400_BAD_REQUEST)
             partial_amount = _parse_decimal(request.data.get('amount'))
@@ -1749,7 +1879,10 @@ def account_client_pay(request, pk):
                         changed_tx_ids.add(tx.pk)
 
         elif mode == 'full':
-            txs = list(client.transactions.filter(original_amount__gt=F('paid_amount')))
+            txs_qs = client.transactions.filter(original_amount__gt=F('paid_amount'))
+            if branch_id:
+                txs_qs = txs_qs.filter(branch_id=branch_id)
+            txs = list(txs_qs)
             for tx in txs:
                 remaining = tx.remaining_amount
                 if remaining > Decimal('0'):
@@ -1764,6 +1897,8 @@ def account_client_pay(request, pk):
             start_limit = request.data.get('start_date')
             end_limit = request.data.get('end_date')
             pending_qs = client.transactions.filter(original_amount__gt=F('paid_amount'))
+            if branch_id:
+                pending_qs = pending_qs.filter(branch_id=branch_id)
             if start_limit:
                 try:
                     start_dt = date.fromisoformat(start_limit)
@@ -1795,13 +1930,13 @@ def account_client_pay(request, pk):
 
     changed_transactions = []
     if changed_tx_ids:
-        changed_transactions = AccountTransaction.objects.filter(pk__in=changed_tx_ids).order_by('-date', '-created_at', '-id')
+        changed_transactions = AccountTransaction.objects.select_related('branch').filter(pk__in=changed_tx_ids).order_by('-date', '-created_at', '-id')
 
     return Response({
         'detail': 'Pago registrado correctamente',
         'client': _serialize_account_client(client),
         'transactions': _serialize_transactions(changed_transactions),
-        'totals': _account_transaction_totals(client),
+        'totals': _account_transaction_totals(client, branch_id=branch_id),
     })
 
 
@@ -1810,6 +1945,7 @@ def account_client_pay(request, pk):
 def account_transaction_create(request, pk):
     client = get_object_or_404(AccountClient, pk=pk)
     data = request.data or {}
+    branch = _parse_branch_from_request(request)
 
     amount = _parse_decimal(data.get('amount') or data.get('original') or data.get('monto'))
     if amount <= Decimal('0'):
@@ -1830,6 +1966,7 @@ def account_transaction_create(request, pk):
 
     new_tx = AccountTransaction.objects.create(
         client=client,
+        branch=branch,
         external_id=external_id,
         description=description,
         date=tx_date,
@@ -1847,7 +1984,7 @@ def account_transaction_create(request, pk):
         'detail': 'Movimiento registrado correctamente',
         'transaction': _serialize_transactions([new_tx])[0],
         'client': _serialize_account_client(client),
-        'totals': _account_transaction_totals(client),
+        'totals': _account_transaction_totals(client, branch_id=str(branch.id) if branch else None),
     }, status=status.HTTP_201_CREATED)
 
 

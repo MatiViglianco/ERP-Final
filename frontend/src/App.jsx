@@ -6,9 +6,10 @@ import UploadPage from './pages/Upload.jsx'
 import StatsPage from './pages/Stats.jsx'
 import BankStatsPage from './pages/BankStats.jsx'
 import AccountsPage from './pages/Accounts.jsx'
+import BillingPage from './pages/Billing.jsx'
 import LoginPage from './pages/Login.jsx'
-import SalesBoard from './pages/SalesBoard.jsx'
 import ExpensesBoard from './pages/ExpensesBoard.jsx'
+import SalariesPage from './pages/Salaries.jsx'
 import { AuthProvider, useAuth } from './context/AuthContext.jsx'
 import MenuIcon from '@mui/icons-material/Menu'
 import CloseIcon from '@mui/icons-material/Close'
@@ -33,10 +34,11 @@ function Nav() {
   const navButtons = [
     { to: '/', label: 'Cargar' },
     { to: '/balanza', label: 'Balanza' },
-    { to: '/ventas', label: 'Ventas' },
     { to: '/gastos', label: 'Gastos' },
     { to: '/bancos', label: 'Bancos' },
     { to: '/cuentas', label: 'Cuenta corriente' },
+    { to: '/facturacion', label: 'Facturacion' },
+    { to: '/sueldos', label: 'Sueldos' },
   ]
 
   const handleLogout = async () => {
@@ -131,10 +133,11 @@ function Footer() {
             {[
               { to: '/', label: 'Cargar' },
               { to: '/balanza', label: 'Balanza' },
-              { to: '/ventas', label: 'Ventas' },
               { to: '/gastos', label: 'Gastos' },
               { to: '/bancos', label: 'Bancos' },
               { to: '/cuentas', label: 'Cuenta corriente' },
+              { to: '/facturacion', label: 'Facturacion' },
+              { to: '/sueldos', label: 'Sueldos' },
             ].map((item) => (
               <Button key={item.to} component={Link} to={item.to} color="inherit" sx={{ textTransform: 'none', px: 0 }}>
                 {item.label}
@@ -240,11 +243,7 @@ function AppRoutes() {
           />
           <Route
             path="/ventas"
-            element={(
-              <ProtectedRoute>
-                <SalesBoard />
-              </ProtectedRoute>
-            )}
+            element={<Navigate to="/balanza" replace />}
           />
           <Route
             path="/gastos"
@@ -267,6 +266,22 @@ function AppRoutes() {
             element={(
               <ProtectedRoute>
                 <AccountsPage />
+              </ProtectedRoute>
+            )}
+          />
+          <Route
+            path="/facturacion"
+            element={(
+              <ProtectedRoute>
+                <BillingPage />
+              </ProtectedRoute>
+            )}
+          />
+          <Route
+            path="/sueldos"
+            element={(
+              <ProtectedRoute>
+                <SalariesPage />
               </ProtectedRoute>
             )}
           />

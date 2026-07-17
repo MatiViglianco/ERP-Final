@@ -35,7 +35,7 @@ export default function LoginPage() {
   const [error, setError] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
-  const redirectPath = location.state?.from?.pathname || '/ventas'
+  const redirectPath = location.state?.from?.pathname || '/balanza'
 
   useEffect(() => {
     if (!bootstrapping && user) {

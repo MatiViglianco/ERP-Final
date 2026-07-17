@@ -7,9 +7,27 @@ from django.utils import timezone
 from .text_utils import normalize_search_text
 
 
+class Branch(models.Model):
+    name = models.CharField(max_length=120, unique=True)
+    slug = models.SlugField(max_length=140, unique=True)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['active', 'name']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class UploadBatch(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     original_filename = models.CharField(max_length=255, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='upload_batches')
 
     # Período de datos cargados
     fecha_desde = models.DateField(null=True, blank=True)
@@ -119,6 +137,7 @@ class AccountTransaction(models.Model):
         PAID = 'pagado', 'Pagado'
 
     client = models.ForeignKey(AccountClient, on_delete=models.CASCADE, related_name='transactions')
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='account_transactions')
     external_id = models.CharField(max_length=64, unique=True)
     description = models.CharField(max_length=255, blank=True)
     date = models.DateField(null=True, blank=True)
@@ -201,6 +220,7 @@ class ExpenseEntry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     external_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='expenses')
     date = models.DateField()
     amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
     method = models.CharField(max_length=32, choices=Method.choices, default=Method.CASH)
@@ -237,6 +257,110 @@ class BankExpenseAssignment(models.Model):
 
     def __str__(self):
         return f"{self.external_id} -> {self.category}/{self.subcategory}"
+
+
+class Employee(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=160, unique=True)
+    active = models.BooleanField(default=True)
+    account_client = models.OneToOneField(
+        AccountClient,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='employee_profile',
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['active', 'name']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class EmployeeAlias(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='aliases')
+    alias = models.CharField(max_length=160)
+    normalized_alias = models.CharField(max_length=160, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['alias']
+        indexes = [
+            models.Index(fields=['normalized_alias']),
+            models.Index(fields=['employee', 'alias']),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.alias = (self.alias or '').strip()
+        self.normalized_alias = normalize_search_text(self.alias)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.alias} -> {self.employee.name}"
+
+
+class EmployeeMovement(models.Model):
+    class Source(models.TextChoices):
+        BANK_TRANSFER = 'bank_transfer', 'Transferencia bancaria'
+        CASH_EXPENSE = 'cash_expense', 'Efectivo por gastos'
+        ACCOUNT_CURRENT = 'account_current', 'Cuenta corriente'
+
+    class Status(models.TextChoices):
+        AUTO = 'auto', 'Automatico'
+        REVIEW = 'review', 'Revisar'
+        MANUAL = 'manual', 'Manual'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='movements')
+    source = models.CharField(max_length=24, choices=Source.choices)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.AUTO)
+    date = models.DateField()
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    description = models.TextField(blank=True)
+    bank_transaction = models.OneToOneField(
+        BankTransaction,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='employee_movement',
+    )
+    expense_entry = models.OneToOneField(
+        ExpenseEntry,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='employee_movement',
+    )
+    account_transaction = models.OneToOneField(
+        AccountTransaction,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='employee_movement',
+    )
+    matched_alias = models.CharField(max_length=160, blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+        indexes = [
+            models.Index(fields=['employee', '-date']),
+            models.Index(fields=['source', 'date']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.employee.name} {self.source} {self.amount}"
 
 
 class UserActivity(models.Model):
@@ -324,4 +448,216 @@ class ValeImportItem(models.Model):
 
     def __str__(self):
         return f"{self.batch.lote_id} - {self.client_raw} - {self.amount}"
+
+
+class Invoice(models.Model):
+    class Source(models.TextChoices):
+        ACCOUNT = 'account', 'Cuenta corriente'
+        GETNET = 'getnet', 'Getnet'
+        MANUAL = 'manual', 'Manual'
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Borrador'
+        AUTHORIZED = 'authorized', 'Autorizada'
+        REJECTED = 'rejected', 'Rechazada'
+        ERROR = 'error', 'Error'
+        CANCELLED = 'cancelled', 'Anulada'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client = models.ForeignKey(AccountClient, on_delete=models.PROTECT, null=True, blank=True, related_name='invoices')
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.MANUAL)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
+    issue_date = models.DateField(default=timezone.localdate)
+    point_of_sale = models.PositiveIntegerField(default=0)
+    voucher_type = models.PositiveIntegerField(default=0)
+    voucher_number = models.PositiveIntegerField(null=True, blank=True)
+    currency = models.CharField(max_length=8, default='PES')
+    net_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    vat_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    exempt_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    cae = models.CharField(max_length=32, blank=True)
+    cae_due_date = models.DateField(null=True, blank=True)
+    external_reference = models.CharField(max_length=128, blank=True)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    provider_result = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-issue_date', '-created_at']
+        indexes = [
+            models.Index(fields=['status', 'issue_date']),
+            models.Index(fields=['source', 'issue_date']),
+            models.Index(fields=['client', '-issue_date']),
+            models.Index(fields=['branch', '-issue_date']),
+            models.Index(fields=['external_reference']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['point_of_sale', 'voucher_type', 'voucher_number'],
+                condition=models.Q(voucher_number__isnull=False),
+                name='unique_invoice_voucher_number',
+            ),
+        ]
+
+    def __str__(self):
+        number = self.voucher_number or 'sin numero'
+        return f"{self.get_source_display()} {number} - {self.total_amount}"
+
+
+class InvoiceLine(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='lines')
+    description = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal('1'))
+    unit_price = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    account_transaction = models.ForeignKey(
+        AccountTransaction,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='invoice_lines',
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['invoice']),
+            models.Index(fields=['account_transaction']),
+        ]
+
+    def __str__(self):
+        return f"{self.description} - {self.total}"
+
+
+class InvoiceAccountTransaction(models.Model):
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='account_links')
+    transaction = models.OneToOneField(AccountTransaction, on_delete=models.PROTECT, related_name='invoice_link')
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['invoice']),
+            models.Index(fields=['transaction']),
+        ]
+
+
+class GetnetTerminal(models.Model):
+    code = models.CharField(max_length=32, unique=True)
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='getnet_terminals',
+    )
+    establishment_number = models.CharField(max_length=32, blank=True)
+    establishment_name = models.CharField(max_length=160, blank=True)
+    active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['code']
+        indexes = [
+            models.Index(fields=['branch', 'active']),
+            models.Index(fields=['establishment_number']),
+        ]
+
+    def __str__(self):
+        return f"{self.code} - {self.branch or 'sin sucursal'}"
+
+
+class Payment(models.Model):
+    class Source(models.TextChoices):
+        GETNET = 'getnet', 'Getnet'
+        SANTANDER = 'santander', 'Santander'
+        BANCON = 'bancon', 'Bancor'
+        CASH = 'cash', 'Efectivo'
+        TRANSFER = 'transfer', 'Transferencia'
+        MANUAL = 'manual', 'Manual'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pendiente'
+        APPROVED = 'approved', 'Aprobado'
+        REJECTED = 'rejected', 'Rechazado'
+        RECONCILED = 'reconciled', 'Conciliado'
+        NEEDS_REVIEW = 'needs_review', 'Revisar'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source = models.CharField(max_length=16, choices=Source.choices)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    date = models.DateField(default=timezone.localdate)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    external_id = models.CharField(max_length=128, blank=True)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    provider_status = models.CharField(max_length=64, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    terminal = models.ForeignKey(
+        GetnetTerminal,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+    )
+    client = models.ForeignKey(AccountClient, on_delete=models.PROTECT, null=True, blank=True, related_name='payments')
+    invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    bank_transaction = models.OneToOneField(
+        BankTransaction,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payment',
+    )
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+        indexes = [
+            models.Index(fields=['source', 'status', 'date']),
+            models.Index(fields=['external_id']),
+            models.Index(fields=['client', '-date']),
+            models.Index(fields=['invoice']),
+            models.Index(fields=['terminal', '-date']),
+            models.Index(fields=['branch', '-date']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_source_display()} {self.amount} ({self.status})"
+
+
+class ExternalEvent(models.Model):
+    class Status(models.TextChoices):
+        RECEIVED = 'received', 'Recibido'
+        PROCESSED = 'processed', 'Procesado'
+        DUPLICATE = 'duplicate', 'Duplicado'
+        ERROR = 'error', 'Error'
+
+    provider = models.CharField(max_length=32)
+    event_id = models.CharField(max_length=128)
+    event_type = models.CharField(max_length=64, blank=True)
+    payload_hash = models.CharField(max_length=64)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RECEIVED)
+    error_message = models.TextField(blank=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ('provider', 'event_id')
+        indexes = [
+            models.Index(fields=['provider', 'event_type']),
+            models.Index(fields=['status', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_id}"
 

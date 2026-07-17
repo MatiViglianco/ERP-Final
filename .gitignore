@@ -13,6 +13,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/dev-server.log
 frontend/dev-server.err.log
+frontend/playwright-report/
+frontend/test-results/
+.local-run/
 
 # OS
 .DS_Store

@@ -10,9 +10,24 @@ on:
 jobs:
   django-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: erp_ci
+          POSTGRES_USER: erp_ci
+          POSTGRES_PASSWORD: erp_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp_ci -d erp_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       DJANGO_SECRET_KEY: ci-secret-key
       DJANGO_DEBUG: "False"
+      DATABASE_URL: postgresql://erp_ci:erp_ci_password@127.0.0.1:5432/erp_ci
       DJANGO_ALLOWED_HOSTS: api.mativiglianco.cloud,testserver
       CORS_ALLOWED_ORIGINS: https://api.mativiglianco.cloud,https://vales.mativiglianco.cloud,https://mativiglianco.github.io
       CSRF_TRUSTED_ORIGINS: https://api.mativiglianco.cloud,https://vales.mativiglianco.cloud,https://mativiglianco.github.io
@@ -33,4 +48,4 @@ jobs:
         run: python manage.py check
 
       - name: Backend tests
-        run: python manage.py test statsapp.tests.test_vales_api
+        run: python manage.py test

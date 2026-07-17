@@ -1,0 +1,2 @@
+Nro de Establecimiento,Nombre Establecimiento,Fecha de Operación,Tipo de Transacción,Canal,Modo de Canal,Código del POS,Estado,Cód. de Transacción,Moneda,Monto Bruto Transacción,Monto Neto Transacción,Nro de Cupón,Cód. Aut.
+0000109768,LA CARNICERIA E2E,14/07/2026 09:14:49,Venta,pos,chip,AR0E2E01,Liquidado,E2E-GETNET-CSV,ARS,12345,"12100,50",1001,900001

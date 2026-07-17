@@ -22,6 +22,7 @@ import { useTheme } from '@mui/material/styles'
 import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
+import useBranches from '../hooks/useBranches.js'
 
 const API_SALES_DAILY = `${API_BASE}/sales/daily/`
 const API_SALES_MANUAL = `${API_BASE}/sales/manual/`
@@ -104,8 +105,10 @@ const getStoredFilter = (key) => {
 
 export default function SalesBoard() {
   const { authFetch } = useAuth()
+  const { branches, branchesError } = useBranches(authFetch)
   const [searchParams] = useSearchParams()
   const batchId = searchParams.get('batch_id') || ''
+  const branchParam = searchParams.get('branch_id') || ''
   const theme = useTheme()
   const isMobile = useMediaQuery(theme.breakpoints.down('md'))
 
@@ -119,6 +122,7 @@ export default function SalesBoard() {
   const [error, setError] = useState('')
   const [yearFilter, setYearFilter] = useState(initialYearFilter)
   const [monthFilter, setMonthFilter] = useState(initialMonthFilter)
+  const [branchId, setBranchId] = useState(branchParam)
   const [availableYears, setAvailableYears] = useState([])
   const [availableMonths, setAvailableMonths] = useState([])
   const [weekSummary, setWeekSummary] = useState([])
@@ -145,12 +149,17 @@ export default function SalesBoard() {
     }
   }, [monthFilter])
 
+  useEffect(() => {
+    setBranchId(branchParam)
+  }, [branchParam])
+
   const fetchSales = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const params = new URLSearchParams()
       if (batchId) params.set('batch_id', batchId)
+      if (branchId) params.set('branch_id', branchId)
       if (yearFilter) params.set('year', yearFilter)
       if (monthFilter) params.set('month', monthFilter)
       const query = params.toString()
@@ -215,7 +224,7 @@ export default function SalesBoard() {
     } finally {
       setLoading(false)
     }
-  }, [authFetch, batchId, yearFilter, monthFilter])
+  }, [authFetch, batchId, yearFilter, monthFilter, branchId])
 
   useEffect(() => {
     fetchSales()
@@ -370,6 +379,19 @@ export default function SalesBoard() {
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
         <TextField
           select
+          label="Sucursal"
+          size="small"
+          value={branchId}
+          onChange={(e) => setBranchId(e.target.value)}
+          sx={{ minWidth: 180 }}
+        >
+          <MenuItem value="">Todas</MenuItem>
+          {branches.map((branch) => (
+            <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
+          ))}
+        </TextField>
+        <TextField
+          select
           label="Año"
           size="small"
           value={yearSelectValue}
@@ -394,6 +416,7 @@ export default function SalesBoard() {
           ))}
         </TextField>
       </Stack>
+      {branchesError && <Alert severity="warning">{branchesError}</Alert>}
       <Card sx={{ background: 'rgba(13,13,20,0.85)', borderRadius: 3, border: '1px solid rgba(255,255,255,0.08)' }}>
         <CardContent>
           <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: 'wrap' }}>

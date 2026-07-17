@@ -620,9 +620,12 @@ def _postgres_suggest_clients(alias_value, limit):
     """
     params = [alias_value, alias_value, alias_value, alias_value, alias_value, alias_value, alias_value, alias_value, limit]
     try:
-        with connection.cursor() as cursor:
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
+        # Las extensiones de similitud son opcionales. El savepoint permite
+        # volver al buscador Python sin dejar la transaccion PostgreSQL abortada.
+        with db_transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
     except Exception:
         return []
 

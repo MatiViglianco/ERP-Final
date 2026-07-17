@@ -165,6 +165,14 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DJANGO_FILE_UPLOAD_MAX_MEMORY_
 # Si quieres deshabilitar el cierre por inactividad, deja este valor en None.
 INACTIVITY_TIMEOUT = None
 
+# Facturacion. ARCA_PROVIDER=mock permite probar el flujo completo sin emitir
+# comprobantes reales. Cambiar a un proveedor real solo despues de configurar
+# CUIT, certificado, clave y punto de venta WSFEv1.
+ARCA_PROVIDER = os.environ.get("ARCA_PROVIDER", "mock")
+ARCA_DEFAULT_POINT_OF_SALE = int(os.environ.get("ARCA_DEFAULT_POINT_OF_SALE", "0") or "0")
+ARCA_DEFAULT_VOUCHER_TYPE = int(os.environ.get("ARCA_DEFAULT_VOUCHER_TYPE", "0") or "0")
+GETNET_WEBHOOK_SECRET = os.environ.get("GETNET_WEBHOOK_SECRET", "")
+
 # Logging a stdout para que los errores (p. ej. fallas del OCR) queden visibles
 # en la consola de Dokploy. Sin esto, los errores manejados no se registran.
 LOGGING = {
