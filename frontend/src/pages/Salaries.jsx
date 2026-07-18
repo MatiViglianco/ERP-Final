@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Autocomplete,
@@ -7,9 +7,14 @@ import {
   Card,
   CardContent,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   InputLabel,
+  IconButton,
   LinearProgress,
   MenuItem,
   Select,
@@ -24,6 +29,7 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import AccountBalanceIcon from '@mui/icons-material/AccountBalance'
@@ -31,12 +37,15 @@ import BadgeIcon from '@mui/icons-material/Badge'
 import LocalAtmIcon from '@mui/icons-material/LocalAtm'
 import PointOfSaleIcon from '@mui/icons-material/PointOfSale'
 import SyncIcon from '@mui/icons-material/Sync'
+import EditIcon from '@mui/icons-material/Edit'
+import PersonOffIcon from '@mui/icons-material/PersonOff'
+import RestoreIcon from '@mui/icons-material/Restore'
 import { Bar, Doughnut } from 'react-chartjs-2'
-import { ArcElement, BarElement, CategoryScale, Chart, Legend, LinearScale, Tooltip } from 'chart.js'
+import { ArcElement, BarElement, CategoryScale, Chart, Legend, LinearScale, Tooltip as ChartTooltip } from 'chart.js'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
 
-Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend)
+Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, ChartTooltip, Legend)
 
 const API_SALARIES_SUMMARY = `${API_BASE}/salaries/summary/`
 const API_SALARIES_MONTHLY = `${API_BASE}/salaries/monthly/`
@@ -74,6 +83,40 @@ const CHART_LABELS = {
   bank_transfer: 'Transferencias',
   cash_expense: 'Efectivo',
   account_current: 'Cuenta corriente',
+}
+
+const DOCUMENT_TYPES = [
+  { value: 'dni', label: 'DNI' },
+  { value: 'cuil_cuit', label: 'CUIL/CUIT' },
+]
+
+const TERMINATION_REASONS = [
+  { value: 'resignation', label: 'Renuncia' },
+  { value: 'dismissal', label: 'Despido' },
+  { value: 'other', label: 'Otro' },
+]
+
+const emptyEmployeeForm = () => ({
+  name: '',
+  documentType: '',
+  documentNumber: '',
+  aliases: '',
+  accountClient: null,
+  notes: '',
+})
+
+function localIsoDate() {
+  const now = new Date()
+  const offset = now.getTimezoneOffset() * 60000
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10)
+}
+
+function formatDocument(employee) {
+  if (!employee?.document_number) return 'Sin documento'
+  if (employee.document_type === 'cuil_cuit' && employee.document_number.length === 11) {
+    return `${employee.document_type_label}: ${employee.document_number.slice(0, 2)}-${employee.document_number.slice(2, 10)}-${employee.document_number.slice(10)}`
+  }
+  return `${employee.document_type_label}: ${employee.document_number}`
 }
 
 function formatCurrency(value) {
@@ -128,11 +171,18 @@ export default function SalariesPage() {
   const [movementSource, setMovementSource] = useState('all')
   const [movementPage, setMovementPage] = useState(0)
   const [movementRowsPerPage, setMovementRowsPerPage] = useState(10)
-  const [employeeForm, setEmployeeForm] = useState({
-    name: '',
-    aliases: '',
-    accountClient: null,
+  const [employeeForm, setEmployeeForm] = useState(emptyEmployeeForm)
+  const [employeeStatusFilter, setEmployeeStatusFilter] = useState('active')
+  const [editEmployee, setEditEmployee] = useState(null)
+  const [editEmployeeForm, setEditEmployeeForm] = useState(emptyEmployeeForm)
+  const [statusDialog, setStatusDialog] = useState({
+    open: false,
+    mode: 'deactivate',
+    employee: null,
+    reason: '',
+    date: localIsoDate(),
   })
+  const accountSearchTimer = useRef(null)
 
   const queryString = useMemo(() => new URLSearchParams({ year, month }).toString(), [year, month])
 
@@ -186,6 +236,28 @@ export default function SalariesPage() {
     }
   }, [authFetch])
 
+  const searchAccountClients = useCallback((_event, value, reason) => {
+    if (reason !== 'input') return
+    if (accountSearchTimer.current) clearTimeout(accountSearchTimer.current)
+    const search = value.trim()
+    if (search.length < 2) return
+    accountSearchTimer.current = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ search, limit: '50', ordering: 'last_name' })
+        const resp = await authFetch(`${API_ACCOUNTS}?${params.toString()}`)
+        const data = await resp.json()
+        if (!resp.ok) throw new Error(data.detail || 'No se pudieron buscar cuentas corrientes')
+        setClients((current) => {
+          const merged = new Map(current.map((client) => [client.id, client]))
+          ;(data.results || []).forEach((client) => merged.set(client.id, client))
+          return [...merged.values()]
+        })
+      } catch (err) {
+        setError(err.message)
+      }
+    }, 300)
+  }, [authFetch])
+
   useEffect(() => {
     fetchSummary()
   }, [fetchSummary])
@@ -193,6 +265,10 @@ export default function SalariesPage() {
   useEffect(() => {
     fetchEmployees()
   }, [fetchEmployees])
+
+  useEffect(() => () => {
+    if (accountSearchTimer.current) clearTimeout(accountSearchTimer.current)
+  }, [])
 
   useEffect(() => {
     if (employeeView === 'monthly' && monthlySummary?.year !== Number(year)) fetchMonthlySummary()
@@ -212,14 +288,117 @@ export default function SalariesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: employeeForm.name,
+          document_type: employeeForm.documentType,
+          document_number: employeeForm.documentNumber,
           aliases,
           account_client_id: employeeForm.accountClient?.id || null,
+          notes: employeeForm.notes,
         }),
       })
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo crear el empleado')
       setSuccess(`Empleado creado: ${data.name}`)
-      setEmployeeForm({ name: '', aliases: '', accountClient: null })
+      setEmployeeForm(emptyEmployeeForm())
+      await Promise.all([
+        fetchEmployees(),
+        fetchSummary(),
+        employeeView === 'monthly' ? fetchMonthlySummary() : Promise.resolve(),
+      ])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const accountClientIsLinked = (client, currentEmployeeId = '') => (
+    employees.some((employee) => employee.id !== currentEmployeeId && employee.account_client_id === client.id)
+  )
+
+  const openEditEmployee = (employee) => {
+    const linkedClient = clients.find((client) => client.id === employee.account_client_id) || (
+      employee.account_client_id
+        ? { id: employee.account_client_id, full_name: employee.account_client_name, external_id: employee.account_client_id }
+        : null
+    )
+    setEditEmployee(employee)
+    setEditEmployeeForm({
+      name: employee.name || '',
+      documentType: employee.document_type || '',
+      documentNumber: employee.document_number || '',
+      aliases: (employee.aliases || []).join(', '),
+      accountClient: linkedClient,
+      notes: employee.notes || '',
+    })
+  }
+
+  const saveEmployee = async () => {
+    if (!editEmployee) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const aliases = editEmployeeForm.aliases
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+      const resp = await authFetch(`${API_EMPLOYEES}${editEmployee.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: editEmployeeForm.name,
+          document_type: editEmployeeForm.documentType,
+          document_number: editEmployeeForm.documentNumber,
+          aliases,
+          account_client_id: editEmployeeForm.accountClient?.id || null,
+          notes: editEmployeeForm.notes,
+        }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo actualizar el empleado')
+      setEditEmployee(null)
+      setSuccess(`Empleado actualizado: ${data.name}`)
+      await Promise.all([
+        fetchEmployees(),
+        fetchSummary(),
+        employeeView === 'monthly' ? fetchMonthlySummary() : Promise.resolve(),
+      ])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const openStatusDialog = (employee, mode) => {
+    setStatusDialog({
+      open: true,
+      mode,
+      employee,
+      reason: '',
+      date: localIsoDate(),
+    })
+  }
+
+  const confirmStatusChange = async () => {
+    const { employee, mode, reason, date: terminationDate } = statusDialog
+    if (!employee) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const body = mode === 'deactivate'
+        ? { active: false, termination_reason: reason, termination_date: terminationDate }
+        : { active: true }
+      const resp = await authFetch(`${API_EMPLOYEES}${employee.id}/`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo cambiar el estado del empleado')
+      setStatusDialog((prev) => ({ ...prev, open: false, employee: null }))
+      setSuccess(mode === 'deactivate' ? `Empleado dado de baja: ${data.name}` : `Empleado reactivado: ${data.name}`)
       await Promise.all([
         fetchEmployees(),
         fetchSummary(),
@@ -239,6 +418,9 @@ export default function SalariesPage() {
   const latestBankDates = sources.latest_bank_dates || {}
   const annualEmployeeRows = monthlySummary?.year === Number(year) ? (monthlySummary.employees || []) : []
   const displayedEmployeeRows = employeeView === 'monthly' ? annualEmployeeRows : employeeRows
+  const filteredEmployees = employees.filter((employee) => (
+    employeeStatusFilter === 'all' || (employeeStatusFilter === 'active' ? employee.active : !employee.active)
+  ))
 
   useEffect(() => {
     if (!displayedEmployeeRows.length) {
@@ -381,36 +563,67 @@ export default function SalariesPage() {
         <CardContent>
           <Stack spacing={2}>
             <Box>
-              <Typography variant="h6" fontWeight={700}>Alta rapida de empleado</Typography>
+              <Typography variant="h6" fontWeight={700}>Alta de empleado</Typography>
               <Typography variant="body2" color="text.secondary">
                 Los aliases ayudan a reconocer nombres en extractos, gastos y cuenta corriente.
               </Typography>
             </Box>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(180px, 0.8fr) minmax(140px, 0.5fr) minmax(180px, 0.7fr) minmax(220px, 1fr)' }, gap: 2 }}>
               <TextField
                 label="Nombre"
                 value={employeeForm.name}
                 onChange={(event) => setEmployeeForm((prev) => ({ ...prev, name: event.target.value }))}
-                sx={{ minWidth: { md: 220 } }}
+              />
+              <TextField
+                select
+                label="Tipo de documento"
+                value={employeeForm.documentType}
+                onChange={(event) => setEmployeeForm((prev) => ({
+                  ...prev,
+                  documentType: event.target.value,
+                  documentNumber: event.target.value ? prev.documentNumber : '',
+                }))}
+              >
+                <MenuItem value="">Sin documento</MenuItem>
+                {DOCUMENT_TYPES.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}
+              </TextField>
+              <TextField
+                label={employeeForm.documentType === 'cuil_cuit' ? 'CUIL/CUIT' : 'DNI'}
+                value={employeeForm.documentNumber}
+                disabled={!employeeForm.documentType}
+                onChange={(event) => setEmployeeForm((prev) => ({ ...prev, documentNumber: event.target.value }))}
+                slotProps={{ htmlInput: { inputMode: 'numeric' } }}
               />
               <TextField
                 label="Aliases separados por coma"
                 value={employeeForm.aliases}
                 onChange={(event) => setEmployeeForm((prev) => ({ ...prev, aliases: event.target.value }))}
-                sx={{ minWidth: { md: 280 } }}
               />
               <Autocomplete
                 options={clients}
                 value={employeeForm.accountClient}
                 onChange={(_event, value) => setEmployeeForm((prev) => ({ ...prev, accountClient: value }))}
+                onInputChange={searchAccountClients}
                 getOptionLabel={(option) => option.full_name || option.external_id || ''}
-                sx={{ minWidth: { md: 260 } }}
+                getOptionDisabled={(option) => accountClientIsLinked(option)}
+                isOptionEqualToValue={(option, value) => option.id === value.id}
                 renderInput={(params) => <TextField {...params} label="Cliente cuenta corriente" />}
               />
-              <Button variant="contained" disabled={actionLoading || employeeForm.name.trim().length < 2} onClick={createEmployee}>
+              <TextField
+                label="Notas"
+                value={employeeForm.notes}
+                onChange={(event) => setEmployeeForm((prev) => ({ ...prev, notes: event.target.value }))}
+                sx={{ gridColumn: { md: 'span 2' } }}
+              />
+              <Button
+                variant="contained"
+                disabled={actionLoading || employeeForm.name.trim().length < 2 || Boolean(employeeForm.documentType) !== Boolean(employeeForm.documentNumber.trim())}
+                onClick={createEmployee}
+                sx={{ minHeight: 44 }}
+              >
                 Crear
               </Button>
-            </Stack>
+            </Box>
           </Stack>
         </CardContent>
       </Card>
@@ -608,21 +821,195 @@ export default function SalariesPage() {
 
       <Card>
         <CardContent>
-          <Typography variant="h6" fontWeight={700}>Empleados configurados</Typography>
-          <Divider sx={{ my: 2 }} />
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            {employees.map((employee) => (
-              <Chip
-                key={employee.id}
-                label={`${employee.name}${employee.aliases?.length ? ` (${employee.aliases.join(', ')})` : ''}`}
-                color={employee.active ? 'primary' : 'default'}
-                variant="outlined"
-              />
-            ))}
-            {!employees.length && <Typography color="text.secondary">No hay empleados cargados.</Typography>}
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.5}>
+            <Box>
+              <Typography variant="h6" fontWeight={700}>Gestion de empleados</Typography>
+              <Typography variant="caption" color="text.secondary">
+                {employees.filter((employee) => employee.active).length} activos y {employees.filter((employee) => !employee.active).length} de baja
+              </Typography>
+            </Box>
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={employeeStatusFilter}
+              onChange={(_event, value) => value && setEmployeeStatusFilter(value)}
+              aria-label="Estado de empleados"
+            >
+              <ToggleButton value="active">Activos</ToggleButton>
+              <ToggleButton value="inactive">Bajas</ToggleButton>
+              <ToggleButton value="all">Todos</ToggleButton>
+            </ToggleButtonGroup>
           </Stack>
+          <Divider sx={{ my: 2 }} />
+          <TableContainer>
+            <Table size="small" sx={{ minWidth: 820 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Empleado</TableCell>
+                  <TableCell>Documento</TableCell>
+                  <TableCell>Cuenta corriente</TableCell>
+                  <TableCell>Estado</TableCell>
+                  <TableCell>Fecha de baja</TableCell>
+                  <TableCell align="right">Acciones</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {filteredEmployees.map((employee) => (
+                  <TableRow key={employee.id} hover>
+                    <TableCell>
+                      <Typography fontWeight={700}>{employee.name}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {(employee.aliases || []).filter((alias) => alias.toLocaleLowerCase('es') !== employee.name.toLocaleLowerCase('es')).join(', ') || 'Sin aliases adicionales'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>{formatDocument(employee)}</TableCell>
+                    <TableCell>{employee.account_client_name || 'Sin vincular'}</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        color={employee.active ? 'success' : 'default'}
+                        label={employee.active ? 'Activo' : employee.termination_reason_label || 'Baja'}
+                      />
+                    </TableCell>
+                    <TableCell>{employee.termination_date ? formatDate(employee.termination_date) : '-'}</TableCell>
+                    <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                      <Tooltip title="Editar empleado">
+                        <IconButton size="small" onClick={() => openEditEmployee(employee)} aria-label={`Editar ${employee.name}`}>
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      {employee.active ? (
+                        <Tooltip title="Dar de baja">
+                          <IconButton size="small" color="error" onClick={() => openStatusDialog(employee, 'deactivate')} aria-label={`Dar de baja a ${employee.name}`}>
+                            <PersonOffIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip title="Reactivar empleado">
+                          <IconButton size="small" color="success" onClick={() => openStatusDialog(employee, 'reactivate')} aria-label={`Reactivar a ${employee.name}`}>
+                            <RestoreIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {!filteredEmployees.length && (
+                  <TableRow>
+                    <TableCell colSpan={6}>
+                      <Typography color="text.secondary">No hay empleados en este estado.</Typography>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </TableContainer>
         </CardContent>
       </Card>
+
+      <Dialog open={Boolean(editEmployee)} onClose={() => !actionLoading && setEditEmployee(null)} fullWidth maxWidth="md">
+        <DialogTitle>Editar empleado</DialogTitle>
+        <DialogContent dividers>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 2, pt: 0.5 }}>
+            <TextField
+              label="Nombre"
+              value={editEmployeeForm.name}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, name: event.target.value }))}
+            />
+            <TextField
+              label="Aliases separados por coma"
+              value={editEmployeeForm.aliases}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, aliases: event.target.value }))}
+            />
+            <TextField
+              select
+              label="Tipo de documento"
+              value={editEmployeeForm.documentType}
+              onChange={(event) => setEditEmployeeForm((prev) => ({
+                ...prev,
+                documentType: event.target.value,
+                documentNumber: event.target.value ? prev.documentNumber : '',
+              }))}
+            >
+              <MenuItem value="">Sin documento</MenuItem>
+              {DOCUMENT_TYPES.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}
+            </TextField>
+            <TextField
+              label={editEmployeeForm.documentType === 'cuil_cuit' ? 'CUIL/CUIT' : 'DNI'}
+              value={editEmployeeForm.documentNumber}
+              disabled={!editEmployeeForm.documentType}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, documentNumber: event.target.value }))}
+              slotProps={{ htmlInput: { inputMode: 'numeric' } }}
+            />
+            <Autocomplete
+              options={clients}
+              value={editEmployeeForm.accountClient}
+              onChange={(_event, value) => setEditEmployeeForm((prev) => ({ ...prev, accountClient: value }))}
+              onInputChange={searchAccountClients}
+              getOptionLabel={(option) => option.full_name || option.external_id || ''}
+              getOptionDisabled={(option) => accountClientIsLinked(option, editEmployee?.id)}
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+              renderInput={(params) => <TextField {...params} label="Cliente cuenta corriente" />}
+            />
+            <TextField
+              label="Notas"
+              value={editEmployeeForm.notes}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, notes: event.target.value }))}
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditEmployee(null)} disabled={actionLoading}>Cancelar</Button>
+          <Button
+            variant="contained"
+            onClick={saveEmployee}
+            disabled={actionLoading || editEmployeeForm.name.trim().length < 2 || Boolean(editEmployeeForm.documentType) !== Boolean(editEmployeeForm.documentNumber.trim())}
+          >
+            Guardar
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={statusDialog.open} onClose={() => !actionLoading && setStatusDialog((prev) => ({ ...prev, open: false }))} fullWidth maxWidth="xs">
+        <DialogTitle>{statusDialog.mode === 'deactivate' ? 'Dar de baja al empleado' : 'Reactivar empleado'}</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Typography fontWeight={700}>{statusDialog.employee?.name}</Typography>
+            {statusDialog.mode === 'deactivate' ? (
+              <>
+                <TextField
+                  select
+                  label="Motivo"
+                  value={statusDialog.reason}
+                  onChange={(event) => setStatusDialog((prev) => ({ ...prev, reason: event.target.value }))}
+                >
+                  {TERMINATION_REASONS.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}
+                </TextField>
+                <TextField
+                  type="date"
+                  label="Fecha de baja"
+                  value={statusDialog.date}
+                  onChange={(event) => setStatusDialog((prev) => ({ ...prev, date: event.target.value }))}
+                  slotProps={{ inputLabel: { shrink: true } }}
+                />
+              </>
+            ) : (
+              <Typography color="text.secondary">El empleado volvera a participar de las sincronizaciones automaticas.</Typography>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setStatusDialog((prev) => ({ ...prev, open: false }))} disabled={actionLoading}>Cancelar</Button>
+          <Button
+            variant="contained"
+            color={statusDialog.mode === 'deactivate' ? 'error' : 'success'}
+            onClick={confirmStatusChange}
+            disabled={actionLoading || (statusDialog.mode === 'deactivate' && (!statusDialog.reason || !statusDialog.date))}
+          >
+            {statusDialog.mode === 'deactivate' ? 'Confirmar baja' : 'Reactivar'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

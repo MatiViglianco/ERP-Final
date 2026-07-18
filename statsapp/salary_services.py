@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
+import re
 from threading import Lock
 from time import sleep
 
@@ -23,6 +24,47 @@ from .text_utils import normalize_search_text
 SALARY_CATEGORY = 'SUELDOS'
 _SYNC_LOCK = Lock()
 _SYNC_RETRY_DELAYS = (0.05, 0.15, 0.3)
+
+
+def normalize_employee_document(document_type, document_number):
+    doc_type = (document_type or '').strip().lower()
+    number = re.sub(r'\D', '', str(document_number or ''))
+    if not doc_type and not number:
+        return '', None
+    if doc_type not in Employee.DocumentType.values:
+        raise ValueError('Tipo de documento invalido')
+    if not number:
+        raise ValueError('Numero de documento requerido')
+    if doc_type == Employee.DocumentType.DNI:
+        if len(number) not in {7, 8}:
+            raise ValueError('El DNI debe tener 7 u 8 digitos')
+    elif len(number) != 11:
+        raise ValueError('El CUIL/CUIT debe tener 11 digitos')
+    elif not _valid_cuil_cuit(number):
+        raise ValueError('El CUIL/CUIT no es valido')
+    return doc_type, number
+
+
+def _valid_cuil_cuit(number):
+    weights = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    remainder = sum(int(digit) * weight for digit, weight in zip(number[:10], weights)) % 11
+    check_digit = 11 - remainder
+    if check_digit == 11:
+        check_digit = 0
+    elif check_digit == 10:
+        check_digit = 9
+    return check_digit == int(number[-1])
+
+
+def validate_account_client_assignment(account_client, employee=None):
+    if not account_client:
+        return
+    linked = Employee.objects.filter(account_client=account_client)
+    if employee:
+        linked = linked.exclude(pk=employee.pk)
+    linked_employee = linked.first()
+    if linked_employee:
+        raise ValueError(f'La cuenta corriente ya esta vinculada a {linked_employee.name}')
 
 
 def ensure_employee_alias(employee, alias):
@@ -86,9 +128,15 @@ def employee_payload(employee):
         'id': str(employee.id),
         'name': employee.name,
         'active': employee.active,
+        'document_type': employee.document_type or '',
+        'document_type_label': employee.get_document_type_display() if employee.document_type else '',
+        'document_number': employee.document_number or '',
         'account_client_id': str(employee.account_client_id) if employee.account_client_id else None,
         'account_client_name': employee.account_client.full_name if employee.account_client else '',
         'aliases': aliases,
+        'termination_reason': employee.termination_reason or '',
+        'termination_reason_label': employee.get_termination_reason_display() if employee.termination_reason else '',
+        'termination_date': employee.termination_date.isoformat() if employee.termination_date else None,
         'notes': employee.notes or '',
     }
 
@@ -235,6 +283,7 @@ def _employee_matchers():
             names.append(employee.account_client.full_name)
             names.append(employee.account_client.external_id)
         names.extend(alias.alias for alias in employee.aliases.all())
+        document_number = employee.document_number or ''
         for raw in names:
             normalized = normalize_search_text(raw)
             if len(normalized) < 3:
@@ -243,12 +292,29 @@ def _employee_matchers():
                 'employee': employee,
                 'alias': raw,
                 'normalized': normalized,
+                'document_number': document_number,
             })
     matchers.sort(key=lambda item: len(item['normalized']), reverse=True)
     return matchers
 
 
-def _match_employee(text, matchers):
+def _document_in_text(document_number, text):
+    if not document_number:
+        return False
+    flexible_number = r'[.\-\s]?'.join(re.escape(digit) for digit in document_number)
+    return bool(re.search(rf'(?<!\d){flexible_number}(?!\d)', str(text or '')))
+
+
+def _match_employee(text, matchers, match_documents=False):
+    if match_documents:
+        checked = set()
+        for item in matchers:
+            document_number = item.get('document_number') or ''
+            if not document_number or document_number in checked:
+                continue
+            checked.add(document_number)
+            if _document_in_text(document_number, text):
+                return item['employee'], f"{item['employee'].get_document_type_display()} {document_number}"
     normalized_text = normalize_search_text(text)
     if not normalized_text:
         return None, ''
@@ -282,7 +348,7 @@ def _sync_employee_movements_once(start_date, end_date):
         .select_related('batch')
         .filter(date__gte=start_date, date__lte=end_date, amount__lt=0)
     ):
-        employee, alias = _match_employee(f"{tx.concept} {tx.description}", matchers)
+        employee, alias = _match_employee(f"{tx.concept} {tx.description}", matchers, match_documents=True)
         if not employee:
             continue
         defaults = _movement_defaults(
@@ -589,13 +655,26 @@ def assign_employee_movement(employee, source, source_id, alias=''):
     return movement
 
 
-def create_employee(name, aliases=None, account_client=None, notes=''):
+@transaction.atomic
+def create_employee(name, aliases=None, account_client=None, notes='', document_type=None, document_number=None):
     cleaned_name = (name or '').strip()
     if len(cleaned_name) < 2:
         raise ValueError('Nombre de empleado requerido')
+    document_provided = document_type is not None or document_number is not None
+    doc_type, doc_number = normalize_employee_document(document_type, document_number) if document_provided else ('', None)
+    linked_document = Employee.objects.filter(document_number=doc_number).exclude(name__iexact=cleaned_name).first() if doc_number else None
+    if linked_document:
+        raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
+    existing_employee = Employee.objects.filter(name__iexact=cleaned_name).first()
+    validate_account_client_assignment(account_client, existing_employee)
     employee, _ = Employee.objects.get_or_create(
         name=cleaned_name,
-        defaults={'account_client': account_client, 'notes': notes or ''},
+        defaults={
+            'account_client': account_client,
+            'notes': notes or '',
+            'document_type': doc_type,
+            'document_number': doc_number,
+        },
     )
     changed = []
     if account_client and employee.account_client_id != account_client.id:
@@ -604,6 +683,12 @@ def create_employee(name, aliases=None, account_client=None, notes=''):
     if notes is not None and employee.notes != notes:
         employee.notes = notes
         changed.append('notes')
+    if document_provided and employee.document_type != doc_type:
+        employee.document_type = doc_type
+        changed.append('document_type')
+    if document_provided and employee.document_number != doc_number:
+        employee.document_number = doc_number
+        changed.append('document_number')
     if changed:
         employee.save(update_fields=changed + ['updated_at'])
 

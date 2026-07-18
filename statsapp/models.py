@@ -260,9 +260,20 @@ class BankExpenseAssignment(models.Model):
 
 
 class Employee(models.Model):
+    class DocumentType(models.TextChoices):
+        DNI = 'dni', 'DNI'
+        CUIL_CUIT = 'cuil_cuit', 'CUIL/CUIT'
+
+    class TerminationReason(models.TextChoices):
+        RESIGNATION = 'resignation', 'Renuncia'
+        DISMISSAL = 'dismissal', 'Despido'
+        OTHER = 'other', 'Otro'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=160, unique=True)
     active = models.BooleanField(default=True)
+    document_type = models.CharField(max_length=12, choices=DocumentType.choices, blank=True)
+    document_number = models.CharField(max_length=16, unique=True, null=True, blank=True)
     account_client = models.OneToOneField(
         AccountClient,
         on_delete=models.SET_NULL,
@@ -270,6 +281,8 @@ class Employee(models.Model):
         blank=True,
         related_name='employee_profile',
     )
+    termination_reason = models.CharField(max_length=16, choices=TerminationReason.choices, blank=True)
+    termination_date = models.DateField(null=True, blank=True)
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

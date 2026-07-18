@@ -1,9 +1,13 @@
+from datetime import date
+
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from .models import AccountClient, Employee, EmployeeAlias, EmployeeMovement
 from .salary_services import (
@@ -16,6 +20,8 @@ from .salary_services import (
     movement_payload,
     salaries_monthly_summary,
     salaries_summary,
+    normalize_employee_document,
+    validate_account_client_assignment,
 )
 
 
@@ -58,6 +64,8 @@ def employees_list(request):
             aliases=data.get('aliases') if isinstance(data.get('aliases'), list) else [],
             account_client=account_client,
             notes=data.get('notes') or '',
+            document_type=data.get('document_type') if 'document_type' in data else None,
+            document_number=data.get('document_number') if 'document_number' in data else None,
         )
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -101,35 +109,82 @@ def employee_detail(request, pk):
     employee = get_object_or_404(Employee, pk=pk)
     if request.method == 'DELETE':
         employee.active = False
-        employee.save(update_fields=['active', 'updated_at'])
+        employee.termination_reason = Employee.TerminationReason.OTHER
+        employee.termination_date = timezone.localdate()
+        employee.save(update_fields=['active', 'termination_reason', 'termination_date', 'updated_at'])
         return Response(employee_payload(employee))
 
     data = request.data or {}
-    updated_fields = []
-    if 'name' in data:
-        name = (data.get('name') or '').strip()
-        if len(name) < 2:
-            return Response({'detail': 'Nombre de empleado requerido'}, status=status.HTTP_400_BAD_REQUEST)
-        employee.name = name
-        updated_fields.append('name')
-    if 'active' in data:
-        employee.active = bool(data.get('active'))
-        updated_fields.append('active')
-    if 'notes' in data:
-        employee.notes = data.get('notes') or ''
-        updated_fields.append('notes')
-    if 'account_client_id' in data:
-        account_client_id = data.get('account_client_id')
-        employee.account_client = AccountClient.objects.filter(pk=account_client_id).first() if account_client_id else None
-        updated_fields.append('account_client')
-    if updated_fields:
-        employee.save(update_fields=updated_fields + ['updated_at'])
-    if isinstance(data.get('aliases'), list):
-        EmployeeAlias.objects.filter(employee=employee).delete()
-        try:
-            ensure_employee_alias(employee, employee.name)
-            for alias in data.get('aliases'):
-                ensure_employee_alias(employee, alias)
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        with transaction.atomic():
+            updated_fields = []
+            if 'name' in data:
+                name = (data.get('name') or '').strip()
+                if len(name) < 2:
+                    raise ValueError('Nombre de empleado requerido')
+                if Employee.objects.filter(name__iexact=name).exclude(pk=employee.pk).exists():
+                    raise ValueError('Ya existe otro empleado con ese nombre')
+                employee.name = name
+                updated_fields.append('name')
+
+            if 'document_type' in data or 'document_number' in data:
+                doc_type, doc_number = normalize_employee_document(
+                    data.get('document_type', employee.document_type),
+                    data.get('document_number', employee.document_number),
+                )
+                linked_document = Employee.objects.filter(document_number=doc_number).exclude(pk=employee.pk).first() if doc_number else None
+                if linked_document:
+                    raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
+                employee.document_type = doc_type
+                employee.document_number = doc_number
+                updated_fields.extend(['document_type', 'document_number'])
+
+            if 'active' in data:
+                active_value = data.get('active')
+                if not isinstance(active_value, bool):
+                    raise ValueError('Estado de empleado invalido')
+                employee.active = active_value
+                updated_fields.append('active')
+                if active_value:
+                    employee.termination_reason = ''
+                    employee.termination_date = None
+                    updated_fields.extend(['termination_reason', 'termination_date'])
+                else:
+                    reason = (data.get('termination_reason') or '').strip()
+                    if reason not in Employee.TerminationReason.values:
+                        raise ValueError('Motivo de baja requerido')
+                    try:
+                        termination_date = date.fromisoformat(str(data.get('termination_date') or ''))
+                    except ValueError as exc:
+                        raise ValueError('Fecha de baja invalida') from exc
+                    if termination_date > timezone.localdate():
+                        raise ValueError('La fecha de baja no puede ser futura')
+                    employee.termination_reason = reason
+                    employee.termination_date = termination_date
+                    updated_fields.extend(['termination_reason', 'termination_date'])
+
+            if 'notes' in data:
+                employee.notes = data.get('notes') or ''
+                updated_fields.append('notes')
+            if 'account_client_id' in data:
+                account_client_id = data.get('account_client_id')
+                account_client = None
+                if account_client_id:
+                    account_client = AccountClient.objects.filter(pk=account_client_id).first()
+                    if not account_client:
+                        raise ValueError('Cliente de cuenta corriente invalido')
+                validate_account_client_assignment(account_client, employee)
+                employee.account_client = account_client
+                updated_fields.append('account_client')
+
+            if updated_fields:
+                employee.save(update_fields=list(dict.fromkeys(updated_fields)) + ['updated_at'])
+            if isinstance(data.get('aliases'), list):
+                EmployeeAlias.objects.filter(employee=employee).delete()
+                ensure_employee_alias(employee, employee.name)
+                for alias in data.get('aliases'):
+                    ensure_employee_alias(employee, alias)
+    except (ValueError, IntegrityError) as exc:
+        detail = str(exc) if isinstance(exc, ValueError) else 'No se pudo guardar el empleado por un dato duplicado'
+        return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
     return Response(employee_payload(employee))

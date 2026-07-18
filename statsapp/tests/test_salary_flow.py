@@ -355,3 +355,139 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertIn('ROCIO', response.data['aliases'])
         self.assertEqual(response.data['account_client_name'], 'Empleado, Rocio')
+
+    def test_bank_transfer_matches_employee_by_exact_dni(self):
+        employee = create_employee(
+            'Rocio Documento',
+            aliases=['ROCIO DOCUMENTO'],
+            document_type='dni',
+            document_number='19.440.880',
+        )
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        matching = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 18),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='19.440.880',
+            amount=-65000,
+        )
+        not_matching = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 19),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='1194408809',
+            amount=-1000,
+        )
+
+        sync_employee_movements(date(2026, 7, 1), date(2026, 7, 31))
+
+        movement = EmployeeMovement.objects.get(bank_transaction=matching)
+        self.assertEqual(movement.employee, employee)
+        self.assertEqual(movement.matched_alias, 'DNI 19440880')
+        self.assertFalse(EmployeeMovement.objects.filter(bank_transaction=not_matching).exists())
+
+    def test_employee_endpoint_normalizes_and_validates_documents(self):
+        valid = self.api.post('/api/salaries/employees/', {
+            'name': 'Rocio Cuil',
+            'document_type': 'cuil_cuit',
+            'document_number': '20-12345678-6',
+        }, format='json')
+        invalid = self.api.post('/api/salaries/employees/', {
+            'name': 'Documento Invalido',
+            'document_type': 'cuil_cuit',
+            'document_number': '20-12345678-0',
+        }, format='json')
+        duplicate = self.api.post('/api/salaries/employees/', {
+            'name': 'Documento Repetido',
+            'document_type': 'cuil_cuit',
+            'document_number': '20123456786',
+        }, format='json')
+
+        self.assertEqual(valid.status_code, 201)
+        self.assertEqual(valid.data['document_number'], '20123456786')
+        self.assertEqual(valid.data['document_type_label'], 'CUIL/CUIT')
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.data['detail'], 'El CUIL/CUIT no es valido')
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn('Rocio Cuil', duplicate.data['detail'])
+
+    def test_employee_deactivation_preserves_history_and_stops_future_matching(self):
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        previous_tx = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 5),
+            concept='TRANSFERENCIA DIEGO EMP',
+            amount=-50000,
+        )
+        sync_employee_movements(date(2026, 7, 1), date(2026, 7, 10))
+
+        response = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'active': False,
+            'termination_reason': 'resignation',
+            'termination_date': '2026-07-11',
+        }, format='json')
+        future_tx = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 12),
+            concept='TRANSFERENCIA DIEGO EMP',
+            amount=-60000,
+        )
+        sync_employee_movements(date(2026, 7, 11), date(2026, 7, 31))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['active'])
+        self.assertEqual(response.data['termination_reason_label'], 'Renuncia')
+        self.assertEqual(response.data['termination_date'], '2026-07-11')
+        self.assertTrue(EmployeeMovement.objects.filter(bank_transaction=previous_tx, employee=self.employee).exists())
+        self.assertFalse(EmployeeMovement.objects.filter(bank_transaction=future_tx).exists())
+
+    def test_employee_reactivation_clears_termination_data(self):
+        self.employee.active = False
+        self.employee.termination_reason = Employee.TerminationReason.DISMISSAL
+        self.employee.termination_date = date(2026, 7, 10)
+        self.employee.save(update_fields=['active', 'termination_reason', 'termination_date'])
+
+        response = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'active': True,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['active'])
+        self.assertEqual(response.data['termination_reason'], '')
+        self.assertIsNone(response.data['termination_date'])
+
+    def test_employee_deactivation_requires_reason_and_non_future_date(self):
+        missing_reason = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'active': False,
+            'termination_date': '2026-07-11',
+        }, format='json')
+        future_date = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'active': False,
+            'termination_reason': 'dismissal',
+            'termination_date': '2100-01-01',
+        }, format='json')
+
+        self.assertEqual(missing_reason.status_code, 400)
+        self.assertEqual(missing_reason.data['detail'], 'Motivo de baja requerido')
+        self.assertEqual(future_date.status_code, 400)
+        self.assertEqual(future_date.data['detail'], 'La fecha de baja no puede ser futura')
+        self.employee.refresh_from_db()
+        self.assertTrue(self.employee.active)
+
+    def test_employee_account_client_cannot_be_linked_twice(self):
+        other_employee = create_employee('Otro Empleado', aliases=['OTRO'])
+
+        response = self.api.patch(f'/api/salaries/employees/{other_employee.id}/', {
+            'account_client_id': str(self.employee_client.id),
+        }, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Diego Empleado', response.data['detail'])

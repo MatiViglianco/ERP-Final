@@ -128,9 +128,9 @@ class EmployeeAliasInline(admin.TabularInline):
 
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
-    list_display = ('name', 'active', 'account_client', 'updated_at')
-    list_filter = ('active',)
-    search_fields = ('name', 'aliases__alias', 'account_client__first_name', 'account_client__last_name')
+    list_display = ('name', 'document_type', 'document_number', 'active', 'account_client', 'termination_date', 'updated_at')
+    list_filter = ('active', 'document_type', 'termination_reason')
+    search_fields = ('name', 'document_number', 'aliases__alias', 'account_client__first_name', 'account_client__last_name')
     autocomplete_fields = ('account_client',)
     inlines = (EmployeeAliasInline,)
 
