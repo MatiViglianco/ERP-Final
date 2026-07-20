@@ -58,6 +58,10 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
   await detectedMovements.getByLabel('Buscar movimiento').fill('Pago sueldo')
   await expect(detectedMovements.getByText('1 de 11 movimientos')).toBeVisible()
   await expect(detectedMovements.getByText('Transferencia bancaria')).toBeVisible()
+  await detectedMovements.getByLabel('Buscar movimiento').fill('movimiento inexistente')
+  await expect(detectedMovements.getByText('Sin resultados')).toBeVisible()
+  await detectedMovements.getByRole('button', { name: 'Limpiar filtros' }).click()
+  await expect(detectedMovements.getByText('11 de 11 movimientos')).toBeVisible()
 
   const monthlyResponse = page.waitForResponse((response) => response.url().includes('/api/salaries/monthly/') && response.ok())
   await page.getByRole('button', { name: 'Mensual' }).click()
@@ -122,4 +126,26 @@ test('mantiene utilizable sueldos en pantalla movil', async ({ page }) => {
   expect(rootTheme.scrollbarColor).not.toBe('auto')
   const viewportHasNoOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)
   expect(viewportHasNoOverflow).toBe(true)
+})
+
+test('iguala las tarjetas y muestra estados vacios claros', async ({ page }) => {
+  await page.goto('login')
+  await page.getByLabel('Usuario').fill('e2eadmin')
+  await page.getByLabel(/Contrase/).fill('e2eadmin123')
+  await page.getByRole('button', { name: 'Ingresar' }).click()
+  await page.getByRole('banner').getByRole('link', { name: 'Sueldos' }).click()
+
+  const emptySummaryResponse = page.waitForResponse((response) => response.url().includes('/api/salaries/summary/') && response.url().includes('month=6') && response.ok())
+  await page.locator('#salary-month').click()
+  await page.getByRole('option', { name: 'Junio', exact: true }).click()
+  await emptySummaryResponse
+
+  await expect(page.getByTestId('employee-summary-empty').getByText('Sin actividad en junio')).toBeVisible()
+  await expect(page.getByTestId('movements-empty').getByText('Sin movimientos en junio')).toBeVisible()
+
+  const summaryBox = await page.getByTestId('employee-summary-card').boundingBox()
+  const movementsBox = await page.getByTestId('movements-card').boundingBox()
+  expect(summaryBox).not.toBeNull()
+  expect(movementsBox).not.toBeNull()
+  expect(Math.abs(summaryBox.height - movementsBox.height)).toBeLessThanOrEqual(1)
 })

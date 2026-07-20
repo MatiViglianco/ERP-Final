@@ -89,6 +89,50 @@ const CHART_LABELS = {
   account_current: 'Cuenta corriente',
 }
 
+function EmptyState({ icon: Icon, title, description, action, testId }) {
+  return (
+    <Box
+      role="status"
+      data-testid={testId}
+      sx={{
+        minHeight: 220,
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+        border: '1px dashed',
+        borderColor: 'divider',
+        borderRadius: 1,
+        bgcolor: 'action.hover',
+        px: 3,
+        py: 3,
+      }}
+    >
+      <Box
+        sx={{
+          width: 46,
+          height: 46,
+          display: 'grid',
+          placeItems: 'center',
+          borderRadius: 1,
+          bgcolor: 'action.selected',
+          color: 'text.secondary',
+          mb: 1.5,
+        }}
+      >
+        <Icon />
+      </Box>
+      <Typography fontWeight={700}>{title}</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 380, mt: 0.5 }}>
+        {description}
+      </Typography>
+      {action && <Box sx={{ mt: 2 }}>{action}</Box>}
+    </Box>
+  )
+}
+
 const DOCUMENT_TYPES = [
   { value: 'dni', label: 'DNI' },
   { value: 'cuil_cuit', label: 'CUIL/CUIT' },
@@ -643,16 +687,16 @@ export default function SalariesPage() {
 
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <FormControl sx={{ minWidth: 150 }}>
-          <InputLabel>Anio</InputLabel>
-          <Select label="Anio" value={year} onChange={(event) => setYear(event.target.value)}>
+          <InputLabel id="salary-year-label">Anio</InputLabel>
+          <Select id="salary-year" labelId="salary-year-label" label="Anio" value={year} onChange={(event) => setYear(event.target.value)}>
             {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((item) => (
               <MenuItem key={item} value={String(item)}>{item}</MenuItem>
             ))}
           </Select>
         </FormControl>
         <FormControl sx={{ minWidth: 180 }}>
-          <InputLabel>Mes</InputLabel>
-          <Select label="Mes" value={month} onChange={(event) => setMonth(event.target.value)}>
+          <InputLabel id="salary-month-label">Mes</InputLabel>
+          <Select id="salary-month" labelId="salary-month-label" label="Mes" value={month} onChange={(event) => setMonth(event.target.value)}>
             {MONTHS.map((item) => (
               <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
             ))}
@@ -843,9 +887,9 @@ export default function SalariesPage() {
         </CardContent>
       </Card>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) minmax(0, 1.25fr)' }, gap: 2, alignItems: 'start' }}>
-        <Card>
-          <CardContent>
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1fr) minmax(0, 1.25fr)' }, gap: 2, alignItems: 'stretch' }}>
+        <Card data-testid="employee-summary-card" sx={{ minWidth: 0, height: '100%' }}>
+          <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} spacing={1.5}>
               <Box>
                 <Typography variant="h6" fontWeight={700}>Resumen por empleado</Typography>
@@ -866,60 +910,62 @@ export default function SalariesPage() {
             </Stack>
             {monthlyLoading && <LinearProgress sx={{ mt: 2 }} />}
             <Divider sx={{ my: 2 }} />
-            <TableContainer sx={{ maxHeight: 300 }}>
-              <Table stickyHeader size="small" sx={{ minWidth: 520 }}>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Empleado</TableCell>
-                    <TableCell align="right">Banco</TableCell>
-                    <TableCell align="right">Efectivo</TableCell>
-                    <TableCell align="right">C. corriente</TableCell>
-                    <TableCell align="right">Total</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {displayedEmployeeRows.map((row) => (
-                    <TableRow
-                      key={row.employee_id}
-                      hover
-                      selected={row.employee_id === selectedEmployeeId}
-                      onClick={() => {
-                        setSelectedEmployeeId(row.employee_id)
-                        setSacEmployeeId(row.employee_id)
-                      }}
-                      sx={{ cursor: 'pointer' }}
-                    >
-                      <TableCell>
-                        <Button
-                          size="small"
-                          color="inherit"
-                          onClick={() => {
-                            setSelectedEmployeeId(row.employee_id)
-                            setSacEmployeeId(row.employee_id)
-                          }}
-                          sx={{ minWidth: 0, px: 0, fontWeight: row.employee_id === selectedEmployeeId ? 800 : 600 }}
-                        >
-                          {row.employee_name}
-                        </Button>
-                      </TableCell>
-                      <TableCell align="right">{formatCurrency(row.bank_transfer)}</TableCell>
-                      <TableCell align="right">{formatCurrency(row.cash_expense)}</TableCell>
-                      <TableCell align="right">{formatCurrency(row.account_current)}</TableCell>
-                      <TableCell align="right"><strong>{formatCurrency(row.total)}</strong></TableCell>
-                    </TableRow>
-                  ))}
-                  {!displayedEmployeeRows.length && !monthlyLoading && (
+            {displayedEmployeeRows.length ? (
+              <TableContainer sx={{ maxHeight: 300 }}>
+                <Table stickyHeader size="small" sx={{ minWidth: 520 }}>
+                  <TableHead>
                     <TableRow>
-                      <TableCell colSpan={5}>
-                        <Typography color="text.secondary">
-                          {employeeView === 'monthly' ? 'Sin movimientos detectados en el anio.' : 'Sin movimientos detectados en el periodo.'}
-                        </Typography>
-                      </TableCell>
+                      <TableCell>Empleado</TableCell>
+                      <TableCell align="right">Banco</TableCell>
+                      <TableCell align="right">Efectivo</TableCell>
+                      <TableCell align="right">C. corriente</TableCell>
+                      <TableCell align="right">Total</TableCell>
                     </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
+                  </TableHead>
+                  <TableBody>
+                    {displayedEmployeeRows.map((row) => (
+                      <TableRow
+                        key={row.employee_id}
+                        hover
+                        selected={row.employee_id === selectedEmployeeId}
+                        onClick={() => {
+                          setSelectedEmployeeId(row.employee_id)
+                          setSacEmployeeId(row.employee_id)
+                        }}
+                        sx={{ cursor: 'pointer' }}
+                      >
+                        <TableCell>
+                          <Button
+                            size="small"
+                            color="inherit"
+                            onClick={() => {
+                              setSelectedEmployeeId(row.employee_id)
+                              setSacEmployeeId(row.employee_id)
+                            }}
+                            sx={{ minWidth: 0, px: 0, fontWeight: row.employee_id === selectedEmployeeId ? 800 : 600 }}
+                          >
+                            {row.employee_name}
+                          </Button>
+                        </TableCell>
+                        <TableCell align="right">{formatCurrency(row.bank_transfer)}</TableCell>
+                        <TableCell align="right">{formatCurrency(row.cash_expense)}</TableCell>
+                        <TableCell align="right">{formatCurrency(row.account_current)}</TableCell>
+                        <TableCell align="right"><strong>{formatCurrency(row.total)}</strong></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            ) : !monthlyLoading && (
+              <EmptyState
+                icon={BadgeIcon}
+                testId="employee-summary-empty"
+                title={employeeView === 'monthly' ? `Sin actividad en ${year}` : `Sin actividad en ${MONTHS[Number(month) - 1]?.label.toLocaleLowerCase('es')}`}
+                description={employeeView === 'monthly'
+                  ? 'No se detectaron importes de empleados durante el anio seleccionado.'
+                  : 'No se detectaron transferencias, efectivo ni cuenta corriente para este periodo.'}
+              />
+            )}
 
             {selectedEmployee && (
               <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid rgba(255,255,255,0.12)' }}>
@@ -939,15 +985,15 @@ export default function SalariesPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardContent>
+        <Card data-testid="movements-card" sx={{ minWidth: 0, height: '100%' }}>
+          <CardContent sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'baseline' }} spacing={0.5}>
               <Typography variant="h6" fontWeight={700}>Movimientos detectados</Typography>
               <Typography variant="caption" color="text.secondary">
                 {filteredMovements.length} de {movements.length} movimientos
               </Typography>
             </Stack>
-            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(180px, 1fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr)' }, gap: 1.5, mt: 2 }}>
+            {movements.length > 0 && <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(180px, 1fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr)' }, gap: 1.5, mt: 2 }}>
               <TextField
                 size="small"
                 label="Buscar movimiento"
@@ -984,22 +1030,23 @@ export default function SalariesPage() {
                   ))}
                 </Select>
               </FormControl>
-            </Box>
+            </Box>}
             <Divider sx={{ my: 2 }} />
-            <TableContainer sx={{ maxHeight: 560 }}>
-              <Table stickyHeader size="small" sx={{ minWidth: 820 }}>
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Fecha</TableCell>
-                    <TableCell>Empleado</TableCell>
-                    <TableCell>Origen</TableCell>
-                    <TableCell>Detalle</TableCell>
-                    <TableCell align="right">Importe</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {paginatedMovements.map((movement) => (
-                    <TableRow key={movement.id} hover>
+            {paginatedMovements.length ? (
+              <TableContainer sx={{ maxHeight: 560 }}>
+                <Table stickyHeader size="small" sx={{ minWidth: 820 }}>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Fecha</TableCell>
+                      <TableCell>Empleado</TableCell>
+                      <TableCell>Origen</TableCell>
+                      <TableCell>Detalle</TableCell>
+                      <TableCell align="right">Importe</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {paginatedMovements.map((movement) => (
+                      <TableRow key={movement.id} hover>
                       <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(movement.date)}</TableCell>
                       <TableCell>{movement.employee_name}</TableCell>
                       <TableCell>
@@ -1014,21 +1061,35 @@ export default function SalariesPage() {
                         )}
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>{formatCurrency(movement.amount)}</TableCell>
-                    </TableRow>
-                  ))}
-                  {!paginatedMovements.length && (
-                    <TableRow>
-                      <TableCell colSpan={5}>
-                        <Typography color="text.secondary">
-                          {movements.length ? 'Ningun movimiento coincide con los filtros.' : 'No hay movimientos para mostrar.'}
-                        </Typography>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-            <TablePagination
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            ) : (
+              <EmptyState
+                icon={PointOfSaleIcon}
+                testId="movements-empty"
+                title={movements.length ? 'Sin resultados' : `Sin movimientos en ${MONTHS[Number(month) - 1]?.label.toLocaleLowerCase('es')}`}
+                description={movements.length
+                  ? 'Los filtros actuales no coinciden con ningun movimiento detectado.'
+                  : 'No se detectaron movimientos de empleados para este periodo.'}
+                action={movements.length ? (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => {
+                      setMovementSearch('')
+                      setMovementEmployee('all')
+                      setMovementSource('all')
+                    }}
+                  >
+                    Limpiar filtros
+                  </Button>
+                ) : null}
+              />
+            )}
+            {filteredMovements.length > 0 && <TablePagination
               component="div"
               count={filteredMovements.length}
               page={movementPage}
@@ -1042,7 +1103,7 @@ export default function SalariesPage() {
                 '.MuiTablePagination-toolbar': { px: 0, flexWrap: 'wrap', justifyContent: 'flex-end' },
                 '.MuiTablePagination-spacer': { display: { xs: 'none', sm: 'block' } },
               }}
-            />
+            />}
           </CardContent>
         </Card>
       </Box>
