@@ -108,18 +108,8 @@ export default function BankStatsPage() {
       color: '#fff',
       caretColor: '#fff'
     },
-    '& input::-webkit-calendar-picker-indicator': {
-      filter: 'invert(1)',
-      opacity: 0.9,
-      cursor: 'pointer'
-    },
     '& input::-moz-focus-inner': {
       border: 0
-    },
-    '& input::-moz-calendar-picker-indicator': {
-      filter: 'invert(1)',
-      opacity: 0.9,
-      cursor: 'pointer'
     }
   }), [])
   const monthLabelProps = useMemo(() => ({

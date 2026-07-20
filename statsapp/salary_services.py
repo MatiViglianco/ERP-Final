@@ -457,7 +457,11 @@ def salaries_summary(start_date, end_date, sync=True):
     qs = (
         EmployeeMovement.objects
         .select_related('employee', 'bank_transaction', 'expense_entry', 'account_transaction')
-        .filter(date__gte=start_date, date__lte=end_date)
+        .filter(
+            date__gte=start_date,
+            date__lte=end_date,
+            employee__active=True,
+        )
     )
     totals = {
         EmployeeMovement.Source.BANK_TRANSFER: Decimal('0'),
@@ -546,7 +550,11 @@ def salaries_monthly_summary(year, sync=True):
     movements = (
         EmployeeMovement.objects
         .select_related('employee')
-        .filter(date__gte=start_date, date__lte=end_date)
+        .filter(
+            date__gte=start_date,
+            date__lte=end_date,
+            employee__active=True,
+        )
         .order_by('employee__name', 'date')
     )
     for movement in movements:

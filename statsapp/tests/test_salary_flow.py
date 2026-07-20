@@ -449,6 +449,13 @@ class SalaryFlowTests(TestCase):
         self.assertTrue(EmployeeMovement.objects.filter(bank_transaction=previous_tx, employee=self.employee).exists())
         self.assertFalse(EmployeeMovement.objects.filter(bank_transaction=future_tx).exists())
 
+        summary = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=False)
+        monthly = salaries_monthly_summary(2026, sync=False)
+        self.assertNotIn(str(self.employee.id), [row['employee_id'] for row in summary['employees']])
+        self.assertNotIn(str(self.employee.id), [row['employee_id'] for row in monthly['employees']])
+        self.assertEqual(summary['totals']['total'], 0.0)
+        self.assertEqual(summary['movements'], [])
+
     def test_employee_reactivation_clears_termination_data(self):
         self.employee.active = False
         self.employee.termination_reason = Employee.TerminationReason.DISMISSAL

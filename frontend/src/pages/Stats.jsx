@@ -46,19 +46,6 @@ const CARD_TITLE_SX = {
   mb: 1,
 }
 
-const CALENDAR_FIELD_SX = {
-  '& input::-webkit-calendar-picker-indicator': {
-    filter: 'invert(1)',
-    opacity: 0.9,
-    cursor: 'pointer',
-  },
-  '& input::-moz-calendar-picker-indicator': {
-    filter: 'invert(1)',
-    opacity: 0.9,
-    cursor: 'pointer',
-  },
-}
-
 const toLocalIso = (date) => {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
@@ -606,7 +593,6 @@ export default function StatsPage() {
                   InputLabelProps={{ shrink: true }}
                   value={month || todayIso.slice(0, 7)}
                   onChange={(e) => setMonth(e.target.value)}
-                  sx={CALENDAR_FIELD_SX}
                 />
               </Box>
             )}
@@ -621,7 +607,6 @@ export default function StatsPage() {
                     InputLabelProps={{ shrink: true }}
                     value={fechaDesde}
                     onChange={(e) => setFechaDesde(e.target.value)}
-                    sx={CALENDAR_FIELD_SX}
                   />
                 </Box>
                 {variosDias && (
@@ -633,7 +618,6 @@ export default function StatsPage() {
                       InputLabelProps={{ shrink: true }}
                       value={fechaHasta}
                       onChange={(e) => setFechaHasta(e.target.value)}
-                      sx={CALENDAR_FIELD_SX}
                     />
                   </Box>
                 )}

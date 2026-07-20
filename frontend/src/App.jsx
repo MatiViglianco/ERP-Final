@@ -15,7 +15,45 @@ import MenuIcon from '@mui/icons-material/Menu'
 import CloseIcon from '@mui/icons-material/Close'
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
 
-const darkTheme = createTheme({ palette: { mode: 'dark' } })
+const scrollbarTrack = '#090b0f'
+const scrollbarThumb = '#4b5563'
+
+const darkTheme = createTheme({
+  palette: { mode: 'dark' },
+  components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        html: {
+          colorScheme: 'dark',
+          scrollbarColor: `${scrollbarThumb} ${scrollbarTrack}`,
+          scrollbarWidth: 'thin',
+        },
+        '*': {
+          scrollbarColor: `${scrollbarThumb} ${scrollbarTrack}`,
+          scrollbarWidth: 'thin',
+        },
+        '*::-webkit-scrollbar': {
+          width: 10,
+          height: 10,
+        },
+        '*::-webkit-scrollbar-track': {
+          backgroundColor: scrollbarTrack,
+        },
+        '*::-webkit-scrollbar-thumb': {
+          backgroundColor: scrollbarThumb,
+          border: `2px solid ${scrollbarTrack}`,
+          borderRadius: 8,
+        },
+        '*::-webkit-scrollbar-thumb:hover': {
+          backgroundColor: '#64748b',
+        },
+        'input[type="date"], input[type="month"]': {
+          colorScheme: 'dark',
+        },
+      },
+    },
+  },
+})
 
 function Background() {
   return (

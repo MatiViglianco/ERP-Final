@@ -38,13 +38,6 @@ export default function UploadPage() {
   const navigate = useNavigate()
   const { authFetch } = useAuth()
   const { branches, branchesError } = useBranches(authFetch)
-  const datePickerIconStyles = useMemo(() => ({
-    '& input::-webkit-calendar-picker-indicator': {
-      filter: 'invert(1)',
-      opacity: 1,
-    },
-  }), [])
-
   const buildFormData = (overwrite = false) => {
     if (!file) {
       setError('Selecciona un archivo CSV de la balanza.')
@@ -237,9 +230,9 @@ export default function UploadPage() {
               {branchesError && <Alert severity="warning">{branchesError}</Alert>}
               <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] || null)} />
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: variosDias ? '1fr 1fr' : '1fr' }, gap: 2 }}>
-                <TextField type="date" fullWidth label="Desde" InputLabelProps={{ shrink: true }} value={fechaDesde} onChange={(e) => setFechaDesde(e.target.value)} sx={datePickerIconStyles} />
+                <TextField type="date" fullWidth label="Desde" InputLabelProps={{ shrink: true }} value={fechaDesde} onChange={(e) => setFechaDesde(e.target.value)} />
                 {variosDias && (
-                  <TextField type="date" fullWidth label="Hasta" InputLabelProps={{ shrink: true }} value={fechaHasta} onChange={(e) => setFechaHasta(e.target.value)} sx={datePickerIconStyles} />
+                  <TextField type="date" fullWidth label="Hasta" InputLabelProps={{ shrink: true }} value={fechaHasta} onChange={(e) => setFechaHasta(e.target.value)} />
                 )}
               </Box>
               <FormControlLabel control={<Checkbox checked={variosDias} onChange={(e) => setVariosDias(e.target.checked)} />} label="Varios dias" />

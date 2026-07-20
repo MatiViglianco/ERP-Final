@@ -1264,19 +1264,6 @@ export default function ExpensesBoard() {
     }
   }
 
-  const dateFieldSx = useMemo(() => ({
-    '& input::-webkit-calendar-picker-indicator': {
-      filter: 'invert(1)',
-      opacity: 0.9,
-      cursor: 'pointer',
-    },
-    '& input::-moz-calendar-picker-indicator': {
-      filter: 'invert(1)',
-      opacity: 0.9,
-      cursor: 'pointer',
-    },
-  }), [])
-
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -1321,7 +1308,6 @@ export default function ExpensesBoard() {
               value={newEntry.date}
               onChange={(e) => handleEntryChange('date', e.target.value)}
               fullWidth
-              sx={dateFieldSx}
             />
             <TextField
               label="Monto"
