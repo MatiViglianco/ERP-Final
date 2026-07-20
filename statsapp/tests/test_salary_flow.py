@@ -111,6 +111,112 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(response.data['totals']['cash_expense'], 35000.0)
         self.assertEqual(response.data['employees'][0]['employee_name'], 'Diego Empleado')
 
+    def test_account_current_applies_employee_discount_to_salary_net(self):
+        self.employee.account_discount_percent = Decimal('15.00')
+        self.employee.save(update_fields=['account_discount_percent'])
+        transaction = AccountTransaction.objects.create(
+            client=self.employee_client,
+            external_id='cc-descuento-1',
+            description='Consumo con beneficio',
+            date=date(2026, 7, 11),
+            original_amount=Decimal('10000'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+
+        summary = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+
+        movement = EmployeeMovement.objects.get(account_transaction=transaction)
+        self.assertEqual(movement.gross_amount, Decimal('10000.00'))
+        self.assertEqual(movement.discount_percent, Decimal('15.00'))
+        self.assertEqual(movement.discount_amount, Decimal('1500.00'))
+        self.assertEqual(movement.amount, Decimal('8500.00'))
+        self.assertEqual(movement.deduction_status, EmployeeMovement.DeductionStatus.PENDING)
+        self.assertEqual(summary['totals']['account_current'], 8500.0)
+        self.assertEqual(summary['account_deductions']['gross_amount'], 10000.0)
+        self.assertEqual(summary['account_deductions']['discount_amount'], 1500.0)
+        self.assertEqual(summary['account_deductions']['pending_gross_amount'], 10000.0)
+        self.assertEqual(summary['account_deductions']['pending_discount_amount'], 1500.0)
+        self.assertEqual(summary['account_deductions']['pending_net_amount'], 8500.0)
+        self.assertEqual(summary['account_deductions']['employees'][0]['pending_count'], 1)
+        self.assertEqual(summary['account_deductions']['employees'][0]['pending_gross_amount'], 10000.0)
+        deduction = next(item for item in summary['movements'] if item['source'] == 'account_current')
+        self.assertEqual(deduction['account_deduction']['net_amount'], 8500.0)
+
+    def test_confirm_account_deductions_settles_debt_and_freezes_snapshot(self):
+        self.employee.account_discount_percent = Decimal('10.00')
+        self.employee.save(update_fields=['account_discount_percent'])
+        transaction = AccountTransaction.objects.create(
+            client=self.employee_client,
+            external_id='cc-descuento-confirmar',
+            description='Consumo parcialmente pagado',
+            date=date(2026, 7, 12),
+            original_amount=Decimal('10000'),
+            paid_amount=Decimal('2000'),
+            status=AccountTransaction.Status.PARTIAL,
+            payments=[{'fecha': '2026-07-12', 'monto': 2000.0}],
+        )
+        self.employee_client.total_debt = Decimal('8000')
+        self.employee_client.status = AccountClient.Status.PARTIAL
+        self.employee_client.save(update_fields=['total_debt', 'status'])
+        salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+
+        response = self.api.post('/api/salaries/account-deductions/confirm/', {
+            'employee_id': str(self.employee.id),
+            'year': 2026,
+            'month': 7,
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['confirmed_count'], 1)
+        self.assertEqual(response.data['gross_amount'], 8000.0)
+        self.assertEqual(response.data['discount_amount'], 1000.0)
+        self.assertEqual(response.data['net_amount'], 7000.0)
+        transaction.refresh_from_db()
+        self.employee_client.refresh_from_db()
+        movement = EmployeeMovement.objects.get(account_transaction=transaction)
+        self.assertEqual(transaction.paid_amount, Decimal('10000'))
+        self.assertEqual(transaction.status, AccountTransaction.Status.PAID)
+        self.assertEqual([payment.get('tipo') for payment in transaction.payments[-2:]], [
+            'descuento_sueldo',
+            'beneficio_empleado',
+        ])
+        self.assertEqual(self.employee_client.total_debt, Decimal('0'))
+        self.assertEqual(self.employee_client.status, AccountClient.Status.PAID)
+        self.assertEqual(movement.amount, Decimal('7000.00'))
+        self.assertEqual(movement.deduction_status, EmployeeMovement.DeductionStatus.CONFIRMED)
+        self.assertEqual(movement.deduction_confirmed_by, self.user)
+
+        self.employee.account_discount_percent = Decimal('25.00')
+        self.employee.save(update_fields=['account_discount_percent'])
+        refreshed = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+        movement.refresh_from_db()
+        self.assertEqual(movement.discount_percent, Decimal('10.00'))
+        self.assertEqual(movement.amount, Decimal('7000.00'))
+        self.assertEqual(refreshed['account_deductions']['confirmed_net_amount'], 7000.0)
+
+        repeated = self.api.post('/api/salaries/account-deductions/confirm/', {
+            'employee_id': str(self.employee.id),
+            'year': 2026,
+            'month': 7,
+        }, format='json')
+        self.assertEqual(repeated.status_code, 400)
+        self.assertEqual(repeated.data['detail'], 'No hay consumos pendientes para confirmar')
+
+    def test_employee_discount_percentage_is_validated(self):
+        invalid_create = self.api.post('/api/salaries/employees/', {
+            'name': 'Empleado descuento invalido',
+            'account_discount_percent': '-1',
+        }, format='json')
+        invalid_update = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'account_discount_percent': '100.01',
+        }, format='json')
+
+        self.assertEqual(invalid_create.status_code, 400)
+        self.assertEqual(invalid_create.data['detail'], 'El descuento debe estar entre 0 y 100')
+        self.assertEqual(invalid_update.status_code, 400)
+        self.assertEqual(invalid_update.data['detail'], 'El descuento debe estar entre 0 y 100')
+
     def test_summary_syncs_salary_subcategories_and_detects_all_sources(self):
         salary_category = ExpenseCategory.objects.create(name='SUELDOS')
         ExpenseSubcategory.objects.create(category=salary_category, name='ROCIO')

@@ -52,6 +52,7 @@ Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, ChartTooltip,
 const API_SALARIES_SUMMARY = `${API_BASE}/salaries/summary/`
 const API_SALARIES_MONTHLY = `${API_BASE}/salaries/monthly/`
 const API_SALARIES_AGUINALDO = `${API_BASE}/salaries/aguinaldo/`
+const API_ACCOUNT_DEDUCTIONS_CONFIRM = `${API_BASE}/salaries/account-deductions/confirm/`
 const API_EMPLOYEES = `${API_BASE}/salaries/employees/`
 const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 
@@ -105,6 +106,7 @@ const emptyEmployeeForm = () => ({
   documentNumber: '',
   aliases: '',
   accountClient: null,
+  discountPercent: '0',
   hireDate: '',
   notes: '',
 })
@@ -172,6 +174,7 @@ export default function SalariesPage() {
   const [loading, setLoading] = useState(false)
   const [monthlyLoading, setMonthlyLoading] = useState(false)
   const [actionLoading, setActionLoading] = useState(false)
+  const [deductionLoading, setDeductionLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [monthlySummary, setMonthlySummary] = useState(null)
@@ -199,6 +202,7 @@ export default function SalariesPage() {
     reason: '',
     date: localIsoDate(),
   })
+  const [deductionDialog, setDeductionDialog] = useState({ open: false, row: null })
   const accountSearchTimer = useRef(null)
 
   const queryString = useMemo(() => new URLSearchParams({ year, month }).toString(), [year, month])
@@ -336,6 +340,7 @@ export default function SalariesPage() {
           document_number: employeeForm.documentNumber,
           aliases,
           account_client_id: employeeForm.accountClient?.id || null,
+          account_discount_percent: employeeForm.discountPercent,
           hire_date: employeeForm.hireDate || null,
           notes: employeeForm.notes,
         }),
@@ -373,6 +378,7 @@ export default function SalariesPage() {
       documentNumber: employee.document_number || '',
       aliases: (employee.aliases || []).join(', '),
       accountClient: linkedClient,
+      discountPercent: String(employee.account_discount_percent ?? 0),
       hireDate: employee.hire_date || '',
       notes: employee.notes || '',
     })
@@ -397,6 +403,7 @@ export default function SalariesPage() {
           document_number: editEmployeeForm.documentNumber,
           aliases,
           account_client_id: editEmployeeForm.accountClient?.id || null,
+          account_discount_percent: editEmployeeForm.discountPercent,
           hire_date: editEmployeeForm.hireDate || null,
           notes: editEmployeeForm.notes,
         }),
@@ -487,9 +494,39 @@ export default function SalariesPage() {
     }
   }
 
+  const confirmAccountDeductions = async () => {
+    const row = deductionDialog.row
+    if (!row) return
+    setDeductionLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const resp = await authFetch(API_ACCOUNT_DEDUCTIONS_CONFIRM, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employee_id: row.employee_id, year, month }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo confirmar el descuento')
+      setDeductionDialog({ open: false, row: null })
+      setSuccess(`Cuenta corriente confirmada para ${data.employee_name}: ${formatCurrency(data.net_amount)}`)
+      await Promise.all([
+        fetchSummary(),
+        fetchEmployees(),
+        employeeView === 'monthly' ? fetchMonthlySummary() : Promise.resolve(),
+      ])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDeductionLoading(false)
+    }
+  }
+
   const totals = summary?.totals || {}
   const movements = summary?.movements || []
   const employeeRows = summary?.employees || []
+  const accountDeductions = summary?.account_deductions || {}
+  const accountDeductionRows = accountDeductions.employees || []
   const sources = summary?.sources || {}
   const latestBankDates = sources.latest_bank_dates || {}
   const annualEmployeeRows = monthlySummary?.year === Number(year) ? (monthlySummary.employees || []) : []
@@ -649,129 +686,77 @@ export default function SalariesPage() {
 
       <Card>
         <CardContent>
-          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} spacing={2}>
-            <Stack direction="row" spacing={1.25} alignItems="center">
-              <CalculateIcon color="primary" />
-              <Box>
-                <Typography variant="h6" fontWeight={700}>Aguinaldo estimado</Typography>
-                <Typography variant="caption" color="text.secondary">Sueldo Anual Complementario</Typography>
-              </Box>
-            </Stack>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
-              <FormControl size="small" sx={{ minWidth: 220 }}>
-                <InputLabel id="sac-employee-label">Empleado</InputLabel>
-                <Select
-                  labelId="sac-employee-label"
-                  label="Empleado"
-                  value={activeEmployees.some((employee) => employee.id === sacEmployeeId) ? sacEmployeeId : ''}
-                  onChange={(event) => setSacEmployeeId(event.target.value)}
-                >
-                  {activeEmployees.map((employee) => (
-                    <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <ToggleButtonGroup
-                exclusive
-                size="small"
-                value={sacSemester}
-                onChange={(_event, value) => value && setSacSemester(value)}
-                aria-label="Semestre del aguinaldo"
-              >
-                <ToggleButton value="1">Ene-Jun</ToggleButton>
-                <ToggleButton value="2">Jul-Dic</ToggleButton>
-              </ToggleButtonGroup>
-            </Stack>
+          <Stack direction="row" spacing={1.25} alignItems="center">
+            <PointOfSaleIcon color="warning" />
+            <Box>
+              <Typography variant="h6" fontWeight={700}>Cuenta corriente para descontar</Typography>
+              <Typography variant="caption" color="text.secondary">Consumos del mes con beneficio aplicado y neto a trasladar al sueldo</Typography>
+            </Box>
           </Stack>
-
-          {sacLoading && <LinearProgress sx={{ mt: 2 }} />}
-          {!activeEmployees.length && <Alert severity="warning" sx={{ mt: 2 }}>No hay empleados activos.</Alert>}
-          {sacData && !sacLoading && (
-            <>
-              <Divider sx={{ my: 2 }} />
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Importe estimado</Typography>
-                  <Typography variant="h4" fontWeight={800}>{formatCurrency(sacData.sac_amount)}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Mejor remuneracion</Typography>
-                  <Typography variant="h6" fontWeight={700}>{formatCurrency(sacData.best_remuneration)}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Mes base</Typography>
-                  <Typography variant="h6" fontWeight={700}>{sacData.best_month_label}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Proporcionalidad</Typography>
-                  <Typography variant="h6" fontWeight={700}>
-                    {(Number(sacData.proportion || 0) * 100).toLocaleString('es-AR', { maximumFractionDigits: 1 })}%
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">{sacData.worked_days} de {sacData.semester_days} dias</Typography>
-                </Box>
-              </Box>
-
-              <Stack spacing={1} sx={{ mt: 2 }}>
-                {!sacData.employment_period_confirmed && (
-                  <Alert severity="warning">Falta la fecha de ingreso. La proporcionalidad considera el semestre completo.</Alert>
+          <Divider sx={{ my: 2 }} />
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Consumo bruto</Typography>
+              <Typography variant="h6" fontWeight={800}>{formatCurrency(accountDeductions.gross_amount)}</Typography>
+            </Box>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Beneficio empleados</Typography>
+              <Typography variant="h6" fontWeight={800}>{formatCurrency(accountDeductions.discount_amount)}</Typography>
+            </Box>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Neto a descontar</Typography>
+              <Typography variant="h6" fontWeight={800}>{formatCurrency(accountDeductions.net_amount)}</Typography>
+            </Box>
+            <Box>
+              <Typography variant="caption" color="text.secondary">Pendiente de confirmar</Typography>
+              <Typography variant="h6" fontWeight={800}>{formatCurrency(accountDeductions.pending_net_amount)}</Typography>
+            </Box>
+          </Box>
+          <TableContainer sx={{ mt: 2 }}>
+            <Table size="small" sx={{ minWidth: 760 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Empleado</TableCell>
+                  <TableCell align="right">Bruto</TableCell>
+                  <TableCell align="right">Beneficio</TableCell>
+                  <TableCell align="right">Neto sueldo</TableCell>
+                  <TableCell>Estado</TableCell>
+                  <TableCell align="right">Accion</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {accountDeductionRows.map((row) => (
+                  <TableRow key={row.employee_id} hover>
+                    <TableCell>{row.employee_name}</TableCell>
+                    <TableCell align="right">{formatCurrency(row.gross_amount)}</TableCell>
+                    <TableCell align="right">{formatCurrency(row.discount_amount)}</TableCell>
+                    <TableCell align="right"><strong>{formatCurrency(row.net_amount)}</strong></TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        color={row.pending_count ? 'warning' : 'success'}
+                        label={row.pending_count ? `${row.pending_count} pendiente${row.pending_count === 1 ? '' : 's'}` : 'Confirmado'}
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.pending_count > 0 && (
+                        <Button size="small" variant="outlined" onClick={() => setDeductionDialog({ open: true, row })}>
+                          Confirmar
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {!accountDeductionRows.length && (
+                  <TableRow>
+                    <TableCell colSpan={6}>
+                      <Typography color="text.secondary">No hay consumos de empleados en cuenta corriente para este mes.</Typography>
+                    </TableCell>
+                  </TableRow>
                 )}
-                {!sacData.complete && (
-                  <Alert severity="info">{sacData.confirmed_months} de {sacData.required_months} remuneraciones confirmadas. Los meses restantes usan importes detectados.</Alert>
-                )}
-              </Stack>
-
-              <TableContainer sx={{ mt: 2 }}>
-                <Table size="small" sx={{ minWidth: 720 }}>
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Mes</TableCell>
-                      <TableCell align="right">Detectado</TableCell>
-                      <TableCell>Remuneracion computable</TableCell>
-                      <TableCell align="right">Usado en calculo</TableCell>
-                      <TableCell>Estado</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {sacData.months.map((item) => (
-                      <TableRow key={item.month}>
-                        <TableCell>{item.month_label}</TableCell>
-                        <TableCell align="right">{formatCurrency(item.detected_amount)}</TableCell>
-                        <TableCell sx={{ width: 240 }}>
-                          <TextField
-                            size="small"
-                            type="number"
-                            value={sacDraft[String(item.month)] ?? ''}
-                            placeholder={String(item.detected_amount || 0)}
-                            onChange={(event) => setSacDraft((prev) => ({ ...prev, [String(item.month)]: event.target.value }))}
-                            slotProps={{ htmlInput: { min: 0, step: '0.01', 'aria-label': `Remuneracion computable ${item.month_label}` } }}
-                            fullWidth
-                          />
-                        </TableCell>
-                        <TableCell align="right">{formatCurrency(item.effective_amount)}</TableCell>
-                        <TableCell>
-                          <Chip
-                            size="small"
-                            color={item.confirmed ? 'success' : 'default'}
-                            label={item.confirmed ? 'Confirmada' : 'Sugerida'}
-                          />
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-                <Button
-                  variant="contained"
-                  startIcon={<SaveIcon />}
-                  onClick={saveAguinaldoRemunerations}
-                  disabled={sacSaving || sacLoading}
-                >
-                  Guardar remuneraciones
-                </Button>
-              </Stack>
-            </>
-          )}
+              </TableBody>
+            </Table>
+          </TableContainer>
         </CardContent>
       </Card>
 
@@ -831,6 +816,13 @@ export default function SalariesPage() {
                 getOptionDisabled={(option) => accountClientIsLinked(option)}
                 isOptionEqualToValue={(option, value) => option.id === value.id}
                 renderInput={(params) => <TextField {...params} label="Cliente cuenta corriente" />}
+              />
+              <TextField
+                type="number"
+                label="Descuento cuenta corriente (%)"
+                value={employeeForm.discountPercent}
+                onChange={(event) => setEmployeeForm((prev) => ({ ...prev, discountPercent: event.target.value }))}
+                slotProps={{ htmlInput: { min: 0, max: 100, step: '0.01' } }}
               />
               <TextField
                 label="Notas"
@@ -1013,7 +1005,14 @@ export default function SalariesPage() {
                       <TableCell>
                         <Chip size="small" color={SOURCE_COLORS[movement.source] || 'default'} label={movement.source_label} />
                       </TableCell>
-                      <TableCell sx={{ minWidth: 260, overflowWrap: 'anywhere' }}>{movement.description}</TableCell>
+                      <TableCell sx={{ minWidth: 260, overflowWrap: 'anywhere' }}>
+                        <Typography variant="body2">{movement.description}</Typography>
+                        {movement.account_deduction && (
+                          <Typography variant="caption" color="text.secondary">
+                            Bruto {formatCurrency(movement.account_deduction.gross_amount)} · Beneficio {movement.account_deduction.discount_percent}% ({formatCurrency(movement.account_deduction.discount_amount)}) · {movement.account_deduction.status_label}
+                          </Typography>
+                        )}
+                      </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>{formatCurrency(movement.amount)}</TableCell>
                     </TableRow>
                   ))}
@@ -1078,6 +1077,7 @@ export default function SalariesPage() {
                   <TableCell>Documento</TableCell>
                   <TableCell>Ingreso</TableCell>
                   <TableCell>Cuenta corriente</TableCell>
+                  <TableCell align="right">Desc. CC</TableCell>
                   <TableCell>Estado</TableCell>
                   <TableCell>Fecha de baja</TableCell>
                   <TableCell align="right">Acciones</TableCell>
@@ -1095,6 +1095,7 @@ export default function SalariesPage() {
                     <TableCell>{formatDocument(employee)}</TableCell>
                     <TableCell>{employee.hire_date ? formatDate(employee.hire_date) : '-'}</TableCell>
                     <TableCell>{employee.account_client_name || 'Sin vincular'}</TableCell>
+                    <TableCell align="right">{Number(employee.account_discount_percent || 0).toLocaleString('es-AR', { maximumFractionDigits: 2 })}%</TableCell>
                     <TableCell>
                       <Chip
                         size="small"
@@ -1127,7 +1128,7 @@ export default function SalariesPage() {
                 ))}
                 {!filteredEmployees.length && (
                   <TableRow>
-                    <TableCell colSpan={7}>
+                      <TableCell colSpan={8}>
                       <Typography color="text.secondary">No hay empleados en este estado.</Typography>
                     </TableCell>
                   </TableRow>
@@ -1137,6 +1138,162 @@ export default function SalariesPage() {
           </TableContainer>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardContent>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} spacing={2}>
+            <Stack direction="row" spacing={1.25} alignItems="center">
+              <CalculateIcon color="primary" />
+              <Box>
+                <Typography variant="h6" fontWeight={700}>Aguinaldo estimado</Typography>
+                <Typography variant="caption" color="text.secondary">Sueldo Anual Complementario</Typography>
+              </Box>
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+              <FormControl size="small" sx={{ minWidth: 220 }}>
+                <InputLabel id="sac-employee-label">Empleado</InputLabel>
+                <Select
+                  labelId="sac-employee-label"
+                  label="Empleado"
+                  value={activeEmployees.some((employee) => employee.id === sacEmployeeId) ? sacEmployeeId : ''}
+                  onChange={(event) => setSacEmployeeId(event.target.value)}
+                >
+                  {activeEmployees.map((employee) => (
+                    <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={sacSemester}
+                onChange={(_event, value) => value && setSacSemester(value)}
+                aria-label="Semestre del aguinaldo"
+              >
+                <ToggleButton value="1">Ene-Jun</ToggleButton>
+                <ToggleButton value="2">Jul-Dic</ToggleButton>
+              </ToggleButtonGroup>
+            </Stack>
+          </Stack>
+
+          {sacLoading && <LinearProgress sx={{ mt: 2 }} />}
+          {!activeEmployees.length && <Alert severity="warning" sx={{ mt: 2 }}>No hay empleados activos.</Alert>}
+          {sacData && !sacLoading && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Importe estimado</Typography>
+                  <Typography variant="h4" fontWeight={800}>{formatCurrency(sacData.sac_amount)}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Mejor remuneracion</Typography>
+                  <Typography variant="h6" fontWeight={700}>{formatCurrency(sacData.best_remuneration)}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Mes base</Typography>
+                  <Typography variant="h6" fontWeight={700}>{sacData.best_month_label}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Proporcionalidad</Typography>
+                  <Typography variant="h6" fontWeight={700}>
+                    {(Number(sacData.proportion || 0) * 100).toLocaleString('es-AR', { maximumFractionDigits: 1 })}%
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">{sacData.worked_days} de {sacData.semester_days} dias</Typography>
+                </Box>
+              </Box>
+
+              <Stack spacing={1} sx={{ mt: 2 }}>
+                {!sacData.employment_period_confirmed && (
+                  <Alert severity="warning">Falta la fecha de ingreso. La proporcionalidad considera el semestre completo.</Alert>
+                )}
+                {!sacData.complete && (
+                  <Alert severity="info">{sacData.confirmed_months} de {sacData.required_months} remuneraciones confirmadas. Los meses restantes usan importes detectados.</Alert>
+                )}
+              </Stack>
+
+              <TableContainer sx={{ mt: 2 }}>
+                <Table size="small" sx={{ minWidth: 720 }}>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Mes</TableCell>
+                      <TableCell align="right">Detectado</TableCell>
+                      <TableCell>Remuneracion computable</TableCell>
+                      <TableCell align="right">Usado en calculo</TableCell>
+                      <TableCell>Estado</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {sacData.months.map((item) => (
+                      <TableRow key={item.month}>
+                        <TableCell>{item.month_label}</TableCell>
+                        <TableCell align="right">{formatCurrency(item.detected_amount)}</TableCell>
+                        <TableCell sx={{ width: 240 }}>
+                          <TextField
+                            size="small"
+                            type="number"
+                            value={sacDraft[String(item.month)] ?? ''}
+                            placeholder={String(item.detected_amount || 0)}
+                            onChange={(event) => setSacDraft((prev) => ({ ...prev, [String(item.month)]: event.target.value }))}
+                            slotProps={{ htmlInput: { min: 0, step: '0.01', 'aria-label': `Remuneracion computable ${item.month_label}` } }}
+                            fullWidth
+                          />
+                        </TableCell>
+                        <TableCell align="right">{formatCurrency(item.effective_amount)}</TableCell>
+                        <TableCell>
+                          <Chip
+                            size="small"
+                            color={item.confirmed ? 'success' : 'default'}
+                            label={item.confirmed ? 'Confirmada' : 'Sugerida'}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+                <Button
+                  variant="contained"
+                  startIcon={<SaveIcon />}
+                  onClick={saveAguinaldoRemunerations}
+                  disabled={sacSaving || sacLoading}
+                >
+                  Guardar remuneraciones
+                </Button>
+              </Stack>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={deductionDialog.open} onClose={() => !deductionLoading && setDeductionDialog({ open: false, row: null })} fullWidth maxWidth="xs">
+        <DialogTitle>Confirmar descuento de cuenta corriente</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Typography fontWeight={700}>{deductionDialog.row?.employee_name}</Typography>
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
+              <Box>
+                <Typography variant="caption" color="text.secondary">Consumo bruto</Typography>
+                <Typography fontWeight={700}>{formatCurrency(deductionDialog.row?.pending_gross_amount)}</Typography>
+              </Box>
+              <Box>
+                <Typography variant="caption" color="text.secondary">Beneficio</Typography>
+                <Typography fontWeight={700}>{formatCurrency(deductionDialog.row?.pending_discount_amount)}</Typography>
+              </Box>
+              <Box sx={{ gridColumn: '1 / -1' }}>
+                <Typography variant="caption" color="text.secondary">Neto que se trasladara al sueldo</Typography>
+                <Typography variant="h5" fontWeight={800}>{formatCurrency(deductionDialog.row?.pending_net_amount)}</Typography>
+              </Box>
+            </Box>
+            <Alert severity="warning">Al confirmar, estos consumos quedaran cancelados en cuenta corriente y el calculo del mes no cambiara aunque luego se modifique el porcentaje.</Alert>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeductionDialog({ open: false, row: null })} disabled={deductionLoading}>Cancelar</Button>
+          <Button variant="contained" onClick={confirmAccountDeductions} disabled={deductionLoading}>Confirmar descuento</Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={Boolean(editEmployee)} onClose={() => !actionLoading && setEditEmployee(null)} fullWidth maxWidth="md">
         <DialogTitle>Editar empleado</DialogTitle>
@@ -1188,6 +1345,13 @@ export default function SalariesPage() {
               getOptionDisabled={(option) => accountClientIsLinked(option, editEmployee?.id)}
               isOptionEqualToValue={(option, value) => option.id === value.id}
               renderInput={(params) => <TextField {...params} label="Cliente cuenta corriente" />}
+            />
+            <TextField
+              type="number"
+              label="Descuento cuenta corriente (%)"
+              value={editEmployeeForm.discountPercent}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, discountPercent: event.target.value }))}
+              slotProps={{ htmlInput: { min: 0, max: 100, step: '0.01' } }}
             />
             <TextField
               label="Notas"

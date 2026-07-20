@@ -116,7 +116,7 @@ class Command(BaseCommand):
             defaults={
                 'first_name': 'Diego',
                 'last_name': 'E2E',
-                'total_debt': Decimal('9000.00'),
+                'total_debt': Decimal('9800.00'),
                 'status': AccountClient.Status.ACTIVE,
             },
         )
@@ -125,6 +125,7 @@ class Command(BaseCommand):
             aliases=['DIEGO E2E', 'DIEGO'],
             account_client=employee_client,
             hire_date=date(2026, 7, 1),
+            account_discount_percent=Decimal('20.00'),
         )
         EmployeeRemuneration.objects.create(
             employee=diego_employee,

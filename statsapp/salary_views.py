@@ -13,6 +13,7 @@ from .models import AccountClient, Employee, EmployeeAlias, EmployeeMovement
 from .salary_services import (
     aguinaldo_estimate,
     assign_employee_movement,
+    confirm_account_deductions,
     create_employee,
     employee_payload,
     ensure_salary_category_employees,
@@ -20,6 +21,7 @@ from .salary_services import (
     find_employee_by_document_identity,
     month_range,
     movement_payload,
+    normalize_account_discount_percent,
     normalize_hire_date,
     save_aguinaldo_remunerations,
     salaries_monthly_summary,
@@ -78,6 +80,30 @@ def salaries_aguinaldo(request):
     return Response(result)
 
 
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def salaries_account_deductions_confirm(request):
+    data = request.data or {}
+    try:
+        employee = Employee.objects.filter(pk=data.get('employee_id')).first()
+    except (TypeError, ValueError, ValidationError):
+        employee = None
+    if not employee:
+        return Response({'detail': 'Empleado invalido'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        start, end = month_range(data.get('year'), data.get('month'))
+        salaries_summary(start, end, sync=True)
+        result = confirm_account_deductions(
+            employee,
+            start.year,
+            start.month,
+            user=request.user,
+        )
+    except (TypeError, ValueError) as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(result)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAdminUser])
 def employees_list(request):
@@ -99,6 +125,7 @@ def employees_list(request):
             document_type=data.get('document_type') if 'document_type' in data else None,
             document_number=data.get('document_number') if 'document_number' in data else None,
             hire_date=data.get('hire_date'),
+            account_discount_percent=data.get('account_discount_percent') if 'account_discount_percent' in data else None,
         )
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -211,6 +238,9 @@ def employee_detail(request, pk):
                     raise ValueError('La fecha de ingreso no puede ser posterior a la baja')
                 employee.hire_date = hire_date
                 updated_fields.append('hire_date')
+            if 'account_discount_percent' in data:
+                employee.account_discount_percent = normalize_account_discount_percent(data.get('account_discount_percent'))
+                updated_fields.append('account_discount_percent')
             if 'account_client_id' in data:
                 account_client_id = data.get('account_client_id')
                 account_client = None

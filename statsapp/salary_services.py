@@ -6,10 +6,11 @@ from threading import Lock
 from time import sleep
 
 from django.db import OperationalError, transaction
-from django.db.models import Max, Q, Sum
+from django.db.models import F, Max, Q, Sum
 from django.utils import timezone
 
 from .models import (
+    AccountClient,
     AccountTransaction,
     BankTransaction,
     Employee,
@@ -60,6 +61,18 @@ def normalize_hire_date(value):
     if parsed > timezone.localdate():
         raise ValueError('La fecha de ingreso no puede ser futura')
     return parsed
+
+
+def normalize_account_discount_percent(value):
+    if value is None or value == '':
+        return Decimal('0.00')
+    try:
+        percent = Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError('Porcentaje de descuento invalido') from exc
+    if percent < 0 or percent > 100:
+        raise ValueError('El descuento debe estar entre 0 y 100')
+    return percent
 
 
 def _valid_cuil_cuit(number):
@@ -174,6 +187,7 @@ def employee_payload(employee):
         'document_number': employee.document_number or '',
         'account_client_id': str(employee.account_client_id) if employee.account_client_id else None,
         'account_client_name': employee.account_client.full_name if employee.account_client else '',
+        'account_discount_percent': float(employee.account_discount_percent or 0),
         'hire_date': employee.hire_date.isoformat() if employee.hire_date else None,
         'aliases': aliases,
         'termination_reason': employee.termination_reason or '',
@@ -184,7 +198,7 @@ def employee_payload(employee):
 
 
 def movement_payload(movement):
-    return {
+    payload = {
         'id': str(movement.id),
         'employee_id': str(movement.employee_id),
         'employee_name': movement.employee.name,
@@ -200,6 +214,18 @@ def movement_payload(movement):
         'expense_entry_id': str(movement.expense_entry_id) if movement.expense_entry_id else None,
         'account_transaction_id': movement.account_transaction.external_id if movement.account_transaction else None,
     }
+    if movement.source == EmployeeMovement.Source.ACCOUNT_CURRENT:
+        payload['account_deduction'] = {
+            'gross_amount': float(movement.gross_amount if movement.gross_amount is not None else movement.amount or 0),
+            'discount_percent': float(movement.discount_percent or 0),
+            'discount_amount': float(movement.discount_amount or 0),
+            'net_amount': float(movement.amount or 0),
+            'status': movement.deduction_status or EmployeeMovement.DeductionStatus.PENDING,
+            'status_label': movement.get_deduction_status_display() if movement.deduction_status else EmployeeMovement.DeductionStatus.PENDING.label,
+            'confirmed_at': movement.deduction_confirmed_at.isoformat() if movement.deduction_confirmed_at else None,
+            'branch_name': movement.account_transaction.branch.name if movement.account_transaction and movement.account_transaction.branch else '',
+        }
+    return payload
 
 
 def _bank_movement_description(tx):
@@ -392,6 +418,47 @@ def _movement_defaults(employee, source, movement_date, amount, description, ali
     }
 
 
+def _account_deduction_values(account_transaction, discount_percent):
+    percent = normalize_account_discount_percent(discount_percent)
+    gross_amount = account_transaction.remaining_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    original_amount = (account_transaction.original_amount or Decimal('0')).quantize(
+        Decimal('0.01'),
+        rounding=ROUND_HALF_UP,
+    )
+    discount_amount = (original_amount * percent / Decimal('100')).quantize(
+        Decimal('0.01'),
+        rounding=ROUND_HALF_UP,
+    )
+    discount_amount = min(discount_amount, gross_amount)
+    net_amount = (gross_amount - discount_amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    return gross_amount, percent, discount_amount, net_amount
+
+
+def _account_movement_defaults(employee, account_transaction, alias, status=EmployeeMovement.Status.AUTO):
+    gross_amount, percent, discount_amount, net_amount = _account_deduction_values(
+        account_transaction,
+        employee.account_discount_percent,
+    )
+    defaults = _movement_defaults(
+        employee=employee,
+        source=EmployeeMovement.Source.ACCOUNT_CURRENT,
+        movement_date=account_transaction.date,
+        amount=net_amount,
+        description=f"Cuenta corriente: {account_transaction.description or account_transaction.external_id}",
+        alias=alias,
+    )
+    defaults.update({
+        'status': status,
+        'gross_amount': gross_amount,
+        'discount_percent': percent,
+        'discount_amount': discount_amount,
+        'deduction_status': EmployeeMovement.DeductionStatus.PENDING,
+        'deduction_confirmed_by': None,
+        'deduction_confirmed_at': None,
+    })
+    return defaults
+
+
 def _sync_employee_movements_once(start_date, end_date):
     matchers = _employee_matchers()
     created = 0
@@ -451,11 +518,25 @@ def _sync_employee_movements_once(start_date, end_date):
         created += 1 if was_created else 0
         updated += 0 if was_created else 1
 
+    pending_account_movements = (
+        EmployeeMovement.objects
+        .select_related('account_transaction')
+        .filter(
+            source=EmployeeMovement.Source.ACCOUNT_CURRENT,
+            date__gte=start_date,
+            date__lte=end_date,
+        )
+        .exclude(deduction_status=EmployeeMovement.DeductionStatus.CONFIRMED)
+    )
+    for movement in pending_account_movements:
+        if not movement.account_transaction or movement.account_transaction.remaining_amount <= Decimal('0'):
+            movement.delete()
+
     account_transactions = (
         AccountTransaction.objects
-        .select_related('client')
+        .select_related('client', 'branch')
         .filter(date__gte=start_date, date__lte=end_date)
-        .filter(original_amount__gt=0)
+        .filter(original_amount__gt=F('paid_amount'))
     )
     employee_by_client = {
         employee.account_client_id: employee
@@ -468,14 +549,10 @@ def _sync_employee_movements_once(start_date, end_date):
             employee, alias = _match_employee(f"{tx.client.full_name if tx.client else ''} {tx.description}", matchers)
         if not employee:
             continue
-        defaults = _movement_defaults(
-            employee=employee,
-            source=EmployeeMovement.Source.ACCOUNT_CURRENT,
-            movement_date=tx.date,
-            amount=tx.original_amount or Decimal('0'),
-            description=f"Cuenta corriente: {tx.description or tx.external_id}",
-            alias=alias,
-        )
+        existing = EmployeeMovement.objects.filter(account_transaction=tx).first()
+        if existing and existing.deduction_status == EmployeeMovement.DeductionStatus.CONFIRMED:
+            continue
+        defaults = _account_movement_defaults(employee, tx, alias)
         _, was_created = EmployeeMovement.objects.update_or_create(
             account_transaction=tx,
             defaults=defaults,
@@ -514,7 +591,7 @@ def salaries_summary(start_date, end_date, sync=True):
         sync_result = {'created': 0, 'updated': 0}
     qs = (
         EmployeeMovement.objects
-        .select_related('employee', 'bank_transaction', 'expense_entry', 'account_transaction')
+        .select_related('employee', 'bank_transaction', 'expense_entry', 'account_transaction__branch')
         .filter(
             date__gte=start_date,
             date__lte=end_date,
@@ -534,6 +611,28 @@ def salaries_summary(start_date, end_date, sync=True):
         'account_current': Decimal('0'),
         'total': Decimal('0'),
     })
+    account_deductions = {
+        'gross_amount': Decimal('0'),
+        'discount_amount': Decimal('0'),
+        'net_amount': Decimal('0'),
+        'pending_gross_amount': Decimal('0'),
+        'pending_discount_amount': Decimal('0'),
+        'pending_net_amount': Decimal('0'),
+        'confirmed_net_amount': Decimal('0'),
+    }
+    deductions_by_employee = defaultdict(lambda: {
+        'employee_id': '',
+        'employee_name': '',
+        'gross_amount': Decimal('0'),
+        'discount_amount': Decimal('0'),
+        'net_amount': Decimal('0'),
+        'pending_gross_amount': Decimal('0'),
+        'pending_discount_amount': Decimal('0'),
+        'pending_net_amount': Decimal('0'),
+        'confirmed_net_amount': Decimal('0'),
+        'pending_count': 0,
+        'confirmed_count': 0,
+    })
     movements = []
     for movement in qs.order_by('-date', 'employee__name'):
         amount = movement.amount or Decimal('0')
@@ -543,6 +642,31 @@ def salaries_summary(start_date, end_date, sync=True):
         entry['employee_name'] = movement.employee.name
         entry[movement.source] += amount
         entry['total'] += amount
+        if movement.source == EmployeeMovement.Source.ACCOUNT_CURRENT:
+            gross_amount = movement.gross_amount if movement.gross_amount is not None else amount
+            discount_amount = movement.discount_amount or Decimal('0')
+            deduction_status = movement.deduction_status or EmployeeMovement.DeductionStatus.PENDING
+            account_deductions['gross_amount'] += gross_amount
+            account_deductions['discount_amount'] += discount_amount
+            account_deductions['net_amount'] += amount
+            deduction_entry = deductions_by_employee[movement.employee_id]
+            deduction_entry['employee_id'] = str(movement.employee_id)
+            deduction_entry['employee_name'] = movement.employee.name
+            deduction_entry['gross_amount'] += gross_amount
+            deduction_entry['discount_amount'] += discount_amount
+            deduction_entry['net_amount'] += amount
+            if deduction_status == EmployeeMovement.DeductionStatus.CONFIRMED:
+                account_deductions['confirmed_net_amount'] += amount
+                deduction_entry['confirmed_net_amount'] += amount
+                deduction_entry['confirmed_count'] += 1
+            else:
+                account_deductions['pending_gross_amount'] += gross_amount
+                account_deductions['pending_discount_amount'] += discount_amount
+                account_deductions['pending_net_amount'] += amount
+                deduction_entry['pending_gross_amount'] += gross_amount
+                deduction_entry['pending_discount_amount'] += discount_amount
+                deduction_entry['pending_net_amount'] += amount
+                deduction_entry['pending_count'] += 1
         movements.append(movement_payload(movement))
 
     employee_rows = []
@@ -556,6 +680,18 @@ def salaries_summary(start_date, end_date, sync=True):
             'total': float(entry['total']),
         })
     employee_rows.sort(key=lambda item: item['total'], reverse=True)
+
+    deduction_rows = [{
+        **entry,
+        'gross_amount': float(entry['gross_amount']),
+        'discount_amount': float(entry['discount_amount']),
+        'net_amount': float(entry['net_amount']),
+        'pending_gross_amount': float(entry['pending_gross_amount']),
+        'pending_discount_amount': float(entry['pending_discount_amount']),
+        'pending_net_amount': float(entry['pending_net_amount']),
+        'confirmed_net_amount': float(entry['confirmed_net_amount']),
+    } for entry in deductions_by_employee.values()]
+    deduction_rows.sort(key=lambda item: (item['pending_count'] == 0, -item['pending_net_amount'], item['employee_name']))
 
     total_amount = sum(totals.values(), Decimal('0'))
     return {
@@ -573,6 +709,16 @@ def salaries_summary(start_date, end_date, sync=True):
         },
         'employees': employee_rows,
         'movements': movements,
+        'account_deductions': {
+            'gross_amount': float(account_deductions['gross_amount']),
+            'discount_amount': float(account_deductions['discount_amount']),
+            'net_amount': float(account_deductions['net_amount']),
+            'pending_gross_amount': float(account_deductions['pending_gross_amount']),
+            'pending_discount_amount': float(account_deductions['pending_discount_amount']),
+            'pending_net_amount': float(account_deductions['pending_net_amount']),
+            'confirmed_net_amount': float(account_deductions['confirmed_net_amount']),
+            'employees': deduction_rows,
+        },
         **_salary_source_diagnostics(start_date, end_date),
     }
 
@@ -789,6 +935,121 @@ def save_aguinaldo_remunerations(employee, year, semester, rows, user=None):
     return aguinaldo_estimate(employee, selected_year, semester)
 
 
+def _refresh_account_clients(client_ids):
+    for client_id in set(client_ids):
+        transactions = list(AccountTransaction.objects.filter(client_id=client_id))
+        pending = sum((tx.remaining_amount for tx in transactions), Decimal('0'))
+        pending_transactions = [tx for tx in transactions if tx.remaining_amount > Decimal('0')]
+        client_status = AccountClient.Status.PAID
+        if pending > Decimal('0'):
+            if any(tx.status == AccountTransaction.Status.OVERDUE for tx in pending_transactions):
+                client_status = AccountClient.Status.OVERDUE
+            elif any(tx.status == AccountTransaction.Status.PARTIAL for tx in pending_transactions):
+                client_status = AccountClient.Status.PARTIAL
+            else:
+                client_status = AccountClient.Status.ACTIVE
+        AccountClient.objects.filter(pk=client_id).update(total_debt=pending, status=client_status)
+
+
+@transaction.atomic
+def confirm_account_deductions(employee, year, month, user=None):
+    start_date, end_date = month_range(year, month)
+    movements = list(
+        EmployeeMovement.objects
+        .select_for_update()
+        .select_related('account_transaction')
+        .filter(
+            employee=employee,
+            source=EmployeeMovement.Source.ACCOUNT_CURRENT,
+            deduction_status=EmployeeMovement.DeductionStatus.PENDING,
+            date__gte=start_date,
+            date__lte=end_date,
+            account_transaction__isnull=False,
+        )
+        .order_by('date', 'created_at')
+    )
+    if not movements:
+        raise ValueError('No hay consumos pendientes para confirmar')
+
+    totals = {
+        'gross_amount': Decimal('0'),
+        'discount_amount': Decimal('0'),
+        'net_amount': Decimal('0'),
+    }
+    confirmed_at = timezone.now()
+    payment_date = timezone.localdate()
+    client_ids = set()
+    confirmed_count = 0
+    for movement in movements:
+        account_transaction = AccountTransaction.objects.select_for_update().get(pk=movement.account_transaction_id)
+        if account_transaction.remaining_amount <= Decimal('0'):
+            movement.delete()
+            continue
+        gross_amount, percent, discount_amount, net_amount = _account_deduction_values(
+            account_transaction,
+            movement.discount_percent,
+        )
+        payments = list(account_transaction.payments or [])
+        if net_amount > Decimal('0'):
+            payments.append({
+                'fecha': payment_date.isoformat(),
+                'monto': float(net_amount),
+                'tipo': 'descuento_sueldo',
+                'empleado': employee.name,
+                'movimiento_sueldo_id': str(movement.id),
+            })
+        if discount_amount > Decimal('0'):
+            payments.append({
+                'fecha': payment_date.isoformat(),
+                'monto': float(discount_amount),
+                'tipo': 'beneficio_empleado',
+                'empleado': employee.name,
+                'movimiento_sueldo_id': str(movement.id),
+            })
+        account_transaction.paid_amount = account_transaction.original_amount
+        account_transaction.status = AccountTransaction.Status.PAID
+        account_transaction.payments = payments
+        account_transaction.save(update_fields=['paid_amount', 'status', 'payments', 'updated_at'])
+
+        movement.gross_amount = gross_amount
+        movement.discount_percent = percent
+        movement.discount_amount = discount_amount
+        movement.amount = net_amount
+        movement.deduction_status = EmployeeMovement.DeductionStatus.CONFIRMED
+        movement.deduction_confirmed_by = user if getattr(user, 'is_authenticated', False) else None
+        movement.deduction_confirmed_at = confirmed_at
+        movement.save(update_fields=[
+            'gross_amount',
+            'discount_percent',
+            'discount_amount',
+            'amount',
+            'deduction_status',
+            'deduction_confirmed_by',
+            'deduction_confirmed_at',
+            'updated_at',
+        ])
+        totals['gross_amount'] += gross_amount
+        totals['discount_amount'] += discount_amount
+        totals['net_amount'] += net_amount
+        client_ids.add(account_transaction.client_id)
+        confirmed_count += 1
+
+    if not confirmed_count:
+        raise ValueError('No hay consumos pendientes para confirmar')
+    _refresh_account_clients(client_ids)
+    return {
+        'employee_id': str(employee.id),
+        'employee_name': employee.name,
+        'year': start_date.year,
+        'month': start_date.month,
+        'confirmed_count': confirmed_count,
+        'gross_amount': float(totals['gross_amount']),
+        'discount_amount': float(totals['discount_amount']),
+        'net_amount': float(totals['net_amount']),
+        'confirmed_at': confirmed_at.isoformat(),
+    }
+
+
 @transaction.atomic
 def assign_employee_movement(employee, source, source_id, alias=''):
     if not employee.active:
@@ -824,9 +1085,11 @@ def assign_employee_movement(employee, source, source_id, alias=''):
         )
         lookup = {'expense_entry': expense}
     elif source == EmployeeMovement.Source.ACCOUNT_CURRENT:
-        account_tx = AccountTransaction.objects.select_related('client').filter(external_id=source_id).first()
+        account_tx = AccountTransaction.objects.select_related('client', 'branch').filter(external_id=source_id).first()
         if not account_tx:
             raise ValueError('Movimiento de cuenta corriente no encontrado')
+        if account_tx.remaining_amount <= Decimal('0'):
+            raise ValueError('El movimiento de cuenta corriente ya esta cancelado')
         linked_employee = Employee.objects.filter(account_client=account_tx.client).exclude(pk=employee.pk).first()
         if linked_employee:
             raise ValueError(f'La cuenta corriente ya esta vinculada a {linked_employee.name}')
@@ -836,13 +1099,14 @@ def assign_employee_movement(employee, source, source_id, alias=''):
             employee.account_client = account_tx.client
             employee.save(update_fields=['account_client', 'updated_at'])
         matched_alias = matched_alias or account_tx.client.full_name
-        defaults = _movement_defaults(
+        existing_movement = EmployeeMovement.objects.filter(account_transaction=account_tx).first()
+        if existing_movement and existing_movement.deduction_status == EmployeeMovement.DeductionStatus.CONFIRMED:
+            raise ValueError('El descuento de cuenta corriente ya fue confirmado')
+        defaults = _account_movement_defaults(
             employee,
-            source,
-            account_tx.date,
-            account_tx.original_amount or Decimal('0'),
-            f"Cuenta corriente: {account_tx.description or account_tx.external_id}",
+            account_tx,
             matched_alias,
+            status=EmployeeMovement.Status.MANUAL,
         )
         lookup = {'account_transaction': account_tx}
     else:
@@ -856,13 +1120,24 @@ def assign_employee_movement(employee, source, source_id, alias=''):
 
 
 @transaction.atomic
-def create_employee(name, aliases=None, account_client=None, notes='', document_type=None, document_number=None, hire_date=None):
+def create_employee(
+    name,
+    aliases=None,
+    account_client=None,
+    notes='',
+    document_type=None,
+    document_number=None,
+    hire_date=None,
+    account_discount_percent=None,
+):
     cleaned_name = (name or '').strip()
     if len(cleaned_name) < 2:
         raise ValueError('Nombre de empleado requerido')
     document_provided = document_type is not None or document_number is not None
     doc_type, doc_number = normalize_employee_document(document_type, document_number) if document_provided else ('', None)
     parsed_hire_date = normalize_hire_date(hire_date)
+    discount_provided = account_discount_percent is not None
+    parsed_discount = normalize_account_discount_percent(account_discount_percent) if discount_provided else Decimal('0.00')
     linked_document = find_employee_by_document_identity(
         doc_type,
         doc_number,
@@ -880,6 +1155,7 @@ def create_employee(name, aliases=None, account_client=None, notes='', document_
             'document_type': doc_type,
             'document_number': doc_number,
             'hire_date': parsed_hire_date,
+            'account_discount_percent': parsed_discount,
         },
     )
     changed = []
@@ -898,6 +1174,9 @@ def create_employee(name, aliases=None, account_client=None, notes='', document_
     if parsed_hire_date and employee.hire_date != parsed_hire_date:
         employee.hire_date = parsed_hire_date
         changed.append('hire_date')
+    if discount_provided and employee.account_discount_percent != parsed_discount:
+        employee.account_discount_percent = parsed_discount
+        changed.append('account_discount_percent')
     if changed:
         employee.save(update_fields=changed + ['updated_at'])
 

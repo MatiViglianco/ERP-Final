@@ -282,6 +282,7 @@ class Employee(models.Model):
         blank=True,
         related_name='employee_profile',
     )
+    account_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
     hire_date = models.DateField(null=True, blank=True)
     termination_reason = models.CharField(max_length=16, choices=TerminationReason.choices, blank=True)
     termination_date = models.DateField(null=True, blank=True)
@@ -293,6 +294,12 @@ class Employee(models.Model):
         ordering = ['name']
         indexes = [
             models.Index(fields=['active', 'name']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(account_discount_percent__gte=0, account_discount_percent__lte=100),
+                name='employee_account_discount_percent_range',
+            ),
         ]
 
     def __str__(self):
@@ -365,6 +372,10 @@ class EmployeeMovement(models.Model):
         REVIEW = 'review', 'Revisar'
         MANUAL = 'manual', 'Manual'
 
+    class DeductionStatus(models.TextChoices):
+        PENDING = 'pending', 'Pendiente'
+        CONFIRMED = 'confirmed', 'Confirmado'
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='movements')
     source = models.CharField(max_length=24, choices=Source.choices)
@@ -393,6 +404,18 @@ class EmployeeMovement(models.Model):
         blank=True,
         related_name='employee_movement',
     )
+    gross_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    discount_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    deduction_status = models.CharField(max_length=16, choices=DeductionStatus.choices, blank=True)
+    deduction_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='confirmed_employee_account_deductions',
+    )
+    deduction_confirmed_at = models.DateTimeField(null=True, blank=True)
     matched_alias = models.CharField(max_length=160, blank=True)
     meta = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -404,6 +427,17 @@ class EmployeeMovement(models.Model):
             models.Index(fields=['employee', '-date']),
             models.Index(fields=['source', 'date']),
             models.Index(fields=['status']),
+            models.Index(fields=['deduction_status', 'date']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(discount_percent__gte=0, discount_percent__lte=100),
+                name='employee_movement_discount_percent_range',
+            ),
+            models.CheckConstraint(
+                check=models.Q(discount_amount__gte=0),
+                name='employee_movement_discount_nonnegative',
+            ),
         ]
 
     def __str__(self):
