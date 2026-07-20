@@ -236,7 +236,8 @@ def parse_santander_csv(uploaded_file):
             date = _parse_date(raw[0])
         except ValueError:
             continue
-        concept = _clean_concept(raw[5] if len(raw) > 5 else raw[2] if len(raw) > 2 else '')
+        raw_concept = raw[5] if len(raw) > 5 else raw[2] if len(raw) > 2 else ''
+        concept = _clean_concept(raw_concept)
         description = (raw[4] if len(raw) > 4 else '').strip()
         amount_raw = raw[6] if len(raw) > 6 else raw[4]
         amount = _to_float(amount_raw)
@@ -244,6 +245,7 @@ def parse_santander_csv(uploaded_file):
             'date': date,
             'concept': concept or description,
             'description': description,
+            'raw_details': _raw_bank_details(raw_concept, description),
             'amount': amount,
         })
     if not rows:
@@ -259,6 +261,19 @@ def _cell_to_text(value):
     if isinstance(value, date):
         return value.strftime('%d/%m/%Y')
     return str(value).strip()
+
+
+def _raw_bank_details(*values):
+    parts = []
+    seen = set()
+    for value in values:
+        cleaned = re.sub(r'\s+', ' ', str(value or '')).strip()
+        normalized = cleaned.casefold()
+        if not cleaned or normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append(cleaned)
+    return ' | '.join(parts)
 
 
 def detect_columns(values):
@@ -304,12 +319,15 @@ def _parse_bancon_xlsx(uploaded_file):
             parsed_date = _parse_date(_value('date'))
         except ValueError:
             continue
-        concept = _clean_concept(_cell_to_text(_value('concept')))
-        description = _clean_concept(_cell_to_text(_value('description')))
+        raw_concept = _cell_to_text(_value('concept'))
+        raw_description = _cell_to_text(_value('description'))
+        concept = _clean_concept(raw_concept)
+        description = _clean_concept(raw_description)
         rows.append({
             'date': parsed_date,
             'concept': concept or description,
             'description': description,
+            'raw_details': _raw_bank_details(raw_concept, raw_description),
             'amount': _to_float(_value('amount')),
         })
     return rows
@@ -347,9 +365,11 @@ def parse_bancon_file(uploaded_file):
                 date = _parse_date(date_val)
             except ValueError:
                 continue
-            concept = _clean_concept(normalized[col_map['concept']] if col_map['concept'] < len(normalized) else '')
+            raw_concept = normalized[col_map['concept']] if col_map['concept'] < len(normalized) else ''
+            concept = _clean_concept(raw_concept)
             desc_idx = col_map.get('description')
-            description = _clean_concept(normalized[desc_idx]) if desc_idx is not None and desc_idx < len(normalized) else ''
+            raw_description = normalized[desc_idx] if desc_idx is not None and desc_idx < len(normalized) else ''
+            description = _clean_concept(raw_description)
             label = concept or description
             amount_val = normalized[col_map['amount']] if col_map['amount'] < len(normalized) else ''
             amount = _to_float(amount_val)
@@ -357,6 +377,7 @@ def parse_bancon_file(uploaded_file):
                 'date': date,
                 'concept': label,
                 'description': description,
+                'raw_details': _raw_bank_details(raw_concept, raw_description),
                 'amount': amount,
             })
         if not rows:
@@ -403,14 +424,17 @@ def parse_bancon_file(uploaded_file):
         if not date_value:
             continue
         date = _parse_date(date_value)
-        concept = _clean_concept(_cell('concept') or '')
-        description = _clean_concept(_cell('description') or '')
+        raw_concept = _cell('concept') or ''
+        raw_description = _cell('description') or ''
+        concept = _clean_concept(raw_concept)
+        description = _clean_concept(raw_description)
         label = concept or description
         amount = _to_float(_cell('amount'))
         rows.append({
             'date': date,
             'concept': label,
             'description': description,
+            'raw_details': _raw_bank_details(raw_concept, raw_description),
             'amount': amount,
         })
     if not rows:

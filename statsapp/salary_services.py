@@ -73,6 +73,30 @@ def _valid_cuil_cuit(number):
     return check_digit == int(number[-1])
 
 
+def _document_identity_key(document_type, document_number):
+    number = re.sub(r'\D', '', str(document_number or ''))
+    if document_type == Employee.DocumentType.DNI and len(number) in {7, 8}:
+        return number.lstrip('0') or '0'
+    if document_type == Employee.DocumentType.CUIL_CUIT and len(number) == 11:
+        return number[2:10].lstrip('0') or '0'
+    return ''
+
+
+def find_employee_by_document_identity(document_type, document_number, exclude_pk=None, exclude_name=''):
+    identity_key = _document_identity_key(document_type, document_number)
+    if not identity_key:
+        return None
+    employees = Employee.objects.exclude(document_number__isnull=True).exclude(document_number='')
+    if exclude_pk:
+        employees = employees.exclude(pk=exclude_pk)
+    if exclude_name:
+        employees = employees.exclude(name__iexact=exclude_name)
+    for employee in employees.only('id', 'name', 'document_type', 'document_number'):
+        if _document_identity_key(employee.document_type, employee.document_number) == identity_key:
+            return employee
+    return None
+
+
 def validate_account_client_assignment(account_client, employee=None):
     if not account_client:
         return
@@ -302,6 +326,7 @@ def _employee_matchers():
             names.append(employee.account_client.external_id)
         names.extend(alias.alias for alias in employee.aliases.all())
         document_number = employee.document_number or ''
+        document_identity = _document_identity_key(employee.document_type, document_number)
         for raw in names:
             normalized = normalize_search_text(raw)
             if len(normalized) < 3:
@@ -311,28 +336,39 @@ def _employee_matchers():
                 'alias': raw,
                 'normalized': normalized,
                 'document_number': document_number,
+                'document_identity': document_identity,
             })
     matchers.sort(key=lambda item: len(item['normalized']), reverse=True)
     return matchers
 
 
-def _document_in_text(document_number, text):
-    if not document_number:
-        return False
-    flexible_number = r'[.\-\s]?'.join(re.escape(digit) for digit in document_number)
-    return bool(re.search(rf'(?<!\d){flexible_number}(?!\d)', str(text or '')))
+def _document_identities_in_text(text):
+    identities = set()
+    pattern = r'(?<!\d)(?:\d[.\-\s]?){6,10}\d(?!\d)'
+    for match in re.finditer(pattern, str(text or '')):
+        number = re.sub(r'\D', '', match.group(0))
+        if len(number) in {7, 8}:
+            identities.add(number.lstrip('0') or '0')
+        elif len(number) == 11 and _valid_cuil_cuit(number):
+            identities.add(number[2:10].lstrip('0') or '0')
+    return identities
 
 
 def _match_employee(text, matchers, match_documents=False):
     if match_documents:
-        checked = set()
+        text_identities = _document_identities_in_text(text)
+        document_matches = {}
         for item in matchers:
-            document_number = item.get('document_number') or ''
-            if not document_number or document_number in checked:
+            identity = item.get('document_identity') or ''
+            if not identity or identity not in text_identities:
                 continue
-            checked.add(document_number)
-            if _document_in_text(document_number, text):
-                return item['employee'], f"{item['employee'].get_document_type_display()} {document_number}"
+            employee = item['employee']
+            document_matches[str(employee.pk)] = (
+                employee,
+                f"{employee.get_document_type_display()} {item['document_number']}",
+            )
+        if len(document_matches) == 1:
+            return next(iter(document_matches.values()))
     normalized_text = normalize_search_text(text)
     if not normalized_text:
         return None, ''
@@ -366,7 +402,11 @@ def _sync_employee_movements_once(start_date, end_date):
         .select_related('batch')
         .filter(date__gte=start_date, date__lte=end_date, amount__lt=0)
     ):
-        employee, alias = _match_employee(f"{tx.concept} {tx.description}", matchers, match_documents=True)
+        employee, alias = _match_employee(
+            f"{tx.concept} {tx.description} {tx.raw_details}",
+            matchers,
+            match_documents=True,
+        )
         if not employee:
             continue
         defaults = _movement_defaults(
@@ -823,7 +863,11 @@ def create_employee(name, aliases=None, account_client=None, notes='', document_
     document_provided = document_type is not None or document_number is not None
     doc_type, doc_number = normalize_employee_document(document_type, document_number) if document_provided else ('', None)
     parsed_hire_date = normalize_hire_date(hire_date)
-    linked_document = Employee.objects.filter(document_number=doc_number).exclude(name__iexact=cleaned_name).first() if doc_number else None
+    linked_document = find_employee_by_document_identity(
+        doc_type,
+        doc_number,
+        exclude_name=cleaned_name,
+    ) if doc_number else None
     if linked_document:
         raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
     existing_employee = Employee.objects.filter(name__iexact=cleaned_name).first()

@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import OperationalError
 from django.db.models.query import QuerySet
 from django.test import TestCase
@@ -470,6 +471,112 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(movement.matched_alias, 'DNI 19440880')
         self.assertFalse(EmployeeMovement.objects.filter(bank_transaction=not_matching).exists())
 
+    def test_santander_transfer_matches_dni_employee_by_equivalent_cuil(self):
+        employee = create_employee(
+            'Rocio DNI CUIL',
+            document_type='dni',
+            document_number='12.345.678',
+        )
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        transaction = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 18),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='CUIL 20-12345678-6',
+            amount=-65000,
+        )
+
+        sync_employee_movements(date(2026, 7, 1), date(2026, 7, 31))
+
+        movement = EmployeeMovement.objects.get(bank_transaction=transaction)
+        self.assertEqual(movement.employee, employee)
+        self.assertEqual(movement.matched_alias, 'DNI 12345678')
+
+    def test_bancon_import_preserves_dni_and_matches_employee_with_cuil(self):
+        employee = create_employee(
+            'Rocio Bancor Documento',
+            document_type='cuil_cuit',
+            document_number='20-12345678-6',
+        )
+        content = (
+            'Fecha;Concepto;Descripcion;Importe\n'
+            '18/07/2026;TRANSFERENCIA A TERCEROS;DNI 12345678;-65000\n'
+        )
+        upload = SimpleUploadedFile('bancor.csv', content.encode('latin-1'), content_type='text/csv')
+
+        response = self.api.post('/api/bank/upload/', {'bank': 'bancon', 'file': upload}, format='multipart')
+        self.assertEqual(response.status_code, 200)
+        transaction = BankTransaction.objects.get(batch__bank='bancon', date=date(2026, 7, 18))
+        self.assertEqual(transaction.description, 'DNI')
+        self.assertIn('DNI 12345678', transaction.raw_details)
+
+        sync_employee_movements(date(2026, 7, 1), date(2026, 7, 31))
+
+        movement = EmployeeMovement.objects.get(bank_transaction=transaction)
+        self.assertEqual(movement.employee, employee)
+        self.assertEqual(movement.matched_alias, 'CUIL/CUIT 20123456786')
+
+    def test_document_matching_does_not_guess_when_legacy_identities_are_duplicated(self):
+        Employee.objects.create(
+            name='Empleado DNI legado',
+            document_type=Employee.DocumentType.DNI,
+            document_number='12345678',
+        )
+        Employee.objects.create(
+            name='Empleado CUIL legado',
+            document_type=Employee.DocumentType.CUIL_CUIT,
+            document_number='20123456786',
+        )
+        batch = BankUploadBatch.objects.create(
+            bank='santander',
+            fecha_desde=date(2026, 7, 1),
+            fecha_hasta=date(2026, 7, 31),
+        )
+        transaction = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 18),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='DNI 12345678',
+            amount=-65000,
+        )
+
+        sync_employee_movements(date(2026, 7, 1), date(2026, 7, 31))
+
+        self.assertFalse(EmployeeMovement.objects.filter(bank_transaction=transaction).exists())
+
+    def test_reimport_enriches_legacy_bank_row_without_duplicating_it(self):
+        batch = BankUploadBatch.objects.create(
+            bank='bancon',
+            fecha_desde=date(2026, 7, 18),
+            fecha_hasta=date(2026, 7, 18),
+        )
+        legacy = BankTransaction.objects.create(
+            batch=batch,
+            date=date(2026, 7, 18),
+            concept='TRANSFERENCIA A TERCEROS',
+            description='DNI',
+            amount=-65000,
+        )
+        content = (
+            'Fecha;Concepto;Descripcion;Importe\n'
+            '18/07/2026;TRANSFERENCIA A TERCEROS;DNI 12345678;-65000\n'
+        )
+        upload = SimpleUploadedFile('bancor.csv', content.encode('latin-1'), content_type='text/csv')
+
+        response = self.api.post('/api/bank/upload/', {'bank': 'bancon', 'file': upload}, format='multipart')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data['batch_id'])
+        self.assertEqual(response.data['summary']['duplicados'], 1)
+        self.assertEqual(response.data['summary']['detalles_actualizados'], 1)
+        self.assertEqual(BankTransaction.objects.filter(batch__bank='bancon').count(), 1)
+        legacy.refresh_from_db()
+        self.assertIn('DNI 12345678', legacy.raw_details)
+
     def test_employee_endpoint_normalizes_and_validates_documents(self):
         valid = self.api.post('/api/salaries/employees/', {
             'name': 'Rocio Cuil',
@@ -486,6 +593,11 @@ class SalaryFlowTests(TestCase):
             'document_type': 'cuil_cuit',
             'document_number': '20123456786',
         }, format='json')
+        equivalent = self.api.post('/api/salaries/employees/', {
+            'name': 'DNI Equivalente',
+            'document_type': 'dni',
+            'document_number': '12345678',
+        }, format='json')
 
         self.assertEqual(valid.status_code, 201)
         self.assertEqual(valid.data['document_number'], '20123456786')
@@ -494,6 +606,8 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(invalid.data['detail'], 'El CUIL/CUIT no es valido')
         self.assertEqual(duplicate.status_code, 400)
         self.assertIn('Rocio Cuil', duplicate.data['detail'])
+        self.assertEqual(equivalent.status_code, 400)
+        self.assertIn('Rocio Cuil', equivalent.data['detail'])
 
     def test_employee_deactivation_preserves_history_and_stops_future_matching(self):
         batch = BankUploadBatch.objects.create(

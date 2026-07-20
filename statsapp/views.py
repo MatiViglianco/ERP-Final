@@ -636,24 +636,34 @@ def upload_bank_file(request):
             round(float(amount_value or 0.0), 2),
         )
 
-    existing_counts = defaultdict(int)
+    existing_by_key = defaultdict(list)
     existing_qs = BankTransaction.objects.filter(
         batch__bank=bank,
         date__gte=fecha_desde,
         date__lte=fecha_hasta,
-    ).values_list('date', 'concept', 'description', 'amount')
-    for date_value, concept_value, description_value, amount_value in existing_qs:
-        existing_counts[_tx_key(date_value, concept_value, description_value, amount_value)] += 1
+    ).order_by('id')
+    for transaction in existing_qs:
+        key = _tx_key(transaction.date, transaction.concept, transaction.description, transaction.amount)
+        existing_by_key[key].append(transaction)
 
     unique_rows = []
     duplicate_count = 0
+    enriched_duplicates = []
     for row in rows:
         key = _tx_key(row.get('date'), row.get('concept'), row.get('description'), row.get('amount'))
-        if existing_counts.get(key, 0) > 0:
-            existing_counts[key] -= 1
+        existing_transactions = existing_by_key.get(key) or []
+        if existing_transactions:
+            existing = existing_transactions.pop(0)
+            raw_details = row.get('raw_details') or ''
+            if raw_details and not existing.raw_details:
+                existing.raw_details = raw_details
+                enriched_duplicates.append(existing)
             duplicate_count += 1
             continue
         unique_rows.append(row)
+
+    if enriched_duplicates:
+        BankTransaction.objects.bulk_update(enriched_duplicates, ['raw_details'], batch_size=1000)
 
     if not unique_rows:
         return Response({
@@ -667,6 +677,7 @@ def upload_bank_file(request):
                 'movimientos': 0,
                 'movimientos_total': len(rows),
                 'duplicados': duplicate_count,
+                'detalles_actualizados': len(enriched_duplicates),
             },
             'detail': 'No se encontraron movimientos nuevos. Se conservaron los existentes.',
         })
@@ -688,6 +699,7 @@ def upload_bank_file(request):
             date=row['date'],
             concept=row.get('concept') or '',
             description=row.get('description') or '',
+            raw_details=row.get('raw_details') or '',
             amount=row.get('amount') or 0.0,
         )
         for row in unique_rows
@@ -707,6 +719,7 @@ def upload_bank_file(request):
             'movimientos': len(unique_rows),
             'movimientos_total': len(rows),
             'duplicados': duplicate_count,
+            'detalles_actualizados': len(enriched_duplicates),
         }
     })
 

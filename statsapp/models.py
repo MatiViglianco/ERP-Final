@@ -86,6 +86,7 @@ class BankTransaction(models.Model):
     date = models.DateField()
     concept = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
+    raw_details = models.TextField(blank=True)
     amount = models.FloatField(default=0.0)
 
     class Meta:

@@ -17,6 +17,7 @@ from .salary_services import (
     employee_payload,
     ensure_salary_category_employees,
     ensure_employee_alias,
+    find_employee_by_document_identity,
     month_range,
     movement_payload,
     normalize_hire_date,
@@ -164,7 +165,11 @@ def employee_detail(request, pk):
                     data.get('document_type', employee.document_type),
                     data.get('document_number', employee.document_number),
                 )
-                linked_document = Employee.objects.filter(document_number=doc_number).exclude(pk=employee.pk).first() if doc_number else None
+                linked_document = find_employee_by_document_identity(
+                    doc_type,
+                    doc_number,
+                    exclude_pk=employee.pk,
+                ) if doc_number else None
                 if linked_document:
                     raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
                 employee.document_type = doc_type
