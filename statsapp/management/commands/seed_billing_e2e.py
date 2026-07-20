@@ -37,9 +37,10 @@ class Command(BaseCommand):
         Invoice.objects.filter(client__external_id='E2E-CLIENTE-FACT').delete()
         AccountTransaction.objects.filter(external_id='E2E-TX-FACT-1').delete()
         EmployeeMovement.objects.all().delete()
-        EmployeeRemuneration.objects.filter(employee__name__in=['Diego E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']).delete()
-        Employee.objects.filter(name__in=['Diego E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']).delete()
-        ExpenseEntry.objects.filter(external_id='E2E-SUELDO-EFECTIVO').delete()
+        e2e_employee_names = ['Diego E2E', 'Nora Norte E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']
+        EmployeeRemuneration.objects.filter(employee__name__in=e2e_employee_names).delete()
+        Employee.objects.filter(name__in=e2e_employee_names).delete()
+        ExpenseEntry.objects.filter(external_id__in=['E2E-SUELDO-EFECTIVO', 'E2E-SUELDO-NORTE']).delete()
         BankUploadBatch.objects.filter(original_filename='e2e-sueldos.csv').delete()
         AccountTransaction.objects.filter(external_id__startswith='E2E-SUELDO-CC').delete()
         Branch.objects.filter(slug__in=['e2e-central', 'e2e-norte']).delete()
@@ -126,6 +127,13 @@ class Command(BaseCommand):
             account_client=employee_client,
             hire_date=date(2026, 7, 1),
             account_discount_percent=Decimal('20.00'),
+            branch=branch_central,
+        )
+        create_employee(
+            'Nora Norte E2E',
+            aliases=['NORA NORTE'],
+            hire_date=date(2026, 7, 1),
+            branch=branch_norte,
         )
         EmployeeRemuneration.objects.create(
             employee=diego_employee,
@@ -158,6 +166,16 @@ class Command(BaseCommand):
             category='SUELDOS',
             subcategory='DIEGO',
             description='Efectivo empleado',
+        )
+        ExpenseEntry.objects.create(
+            external_id='E2E-SUELDO-NORTE',
+            branch=branch_norte,
+            date=date(2026, 7, 9),
+            amount=Decimal('5000'),
+            method=ExpenseEntry.Method.CASH,
+            category='SUELDOS',
+            subcategory='NORA NORTE',
+            description='Efectivo empleado sucursal norte',
         )
         AccountTransaction.objects.create(
             client=employee_client,

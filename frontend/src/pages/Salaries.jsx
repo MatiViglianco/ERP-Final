@@ -46,6 +46,7 @@ import { Bar, Doughnut } from 'react-chartjs-2'
 import { ArcElement, BarElement, CategoryScale, Chart, Legend, LinearScale, Tooltip as ChartTooltip } from 'chart.js'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
+import useBranches from '../hooks/useBranches.js'
 
 Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, ChartTooltip, Legend)
 
@@ -146,6 +147,7 @@ const TERMINATION_REASONS = [
 
 const emptyEmployeeForm = () => ({
   name: '',
+  branchId: '',
   documentType: '',
   documentNumber: '',
   aliases: '',
@@ -209,9 +211,11 @@ function SummaryCard({ icon, label, value, detail }) {
 
 export default function SalariesPage() {
   const { authFetch } = useAuth()
+  const { branches, branchesLoading, branchesError } = useBranches(authFetch)
   const now = new Date()
   const [year, setYear] = useState(String(now.getFullYear()))
   const [month, setMonth] = useState(String(now.getMonth() + 1))
+  const [branchId, setBranchId] = useState('')
   const [summary, setSummary] = useState(null)
   const [employees, setEmployees] = useState([])
   const [clients, setClients] = useState([])
@@ -249,7 +253,16 @@ export default function SalariesPage() {
   const [deductionDialog, setDeductionDialog] = useState({ open: false, row: null })
   const accountSearchTimer = useRef(null)
 
-  const queryString = useMemo(() => new URLSearchParams({ year, month }).toString(), [year, month])
+  const defaultBranchId = useMemo(() => {
+    const primary = branches.find((branch) => branch.slug === 'sucursal-primaria') || branches[0]
+    return primary ? String(primary.id) : ''
+  }, [branches])
+  const selectedBranchName = branches.find((branch) => String(branch.id) === branchId)?.name || 'Todas las sucursales'
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams({ year, month })
+    if (branchId) params.set('branch_id', branchId)
+    return params.toString()
+  }, [branchId, month, year])
 
   const fetchSummary = useCallback(async () => {
     setLoading(true)
@@ -271,6 +284,7 @@ export default function SalariesPage() {
     setError('')
     try {
       const params = new URLSearchParams({ year })
+      if (branchId) params.set('branch_id', branchId)
       const resp = await authFetch(`${API_SALARIES_MONTHLY}?${params.toString()}`)
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo cargar la evolucion mensual')
@@ -280,7 +294,7 @@ export default function SalariesPage() {
     } finally {
       setMonthlyLoading(false)
     }
-  }, [authFetch, year])
+  }, [authFetch, branchId, year])
 
   const fetchAguinaldo = useCallback(async () => {
     if (!sacEmployeeId) {
@@ -355,6 +369,11 @@ export default function SalariesPage() {
   }, [fetchEmployees])
 
   useEffect(() => {
+    if (!defaultBranchId) return
+    setEmployeeForm((current) => (current.branchId ? current : { ...current, branchId: defaultBranchId }))
+  }, [defaultBranchId])
+
+  useEffect(() => {
     fetchAguinaldo()
   }, [fetchAguinaldo])
 
@@ -363,8 +382,9 @@ export default function SalariesPage() {
   }, [])
 
   useEffect(() => {
-    if (employeeView === 'monthly' && monthlySummary?.year !== Number(year)) fetchMonthlySummary()
-  }, [employeeView, fetchMonthlySummary, monthlySummary?.year, year])
+    const loadedBranchId = String(monthlySummary?.branch_id || '')
+    if (employeeView === 'monthly' && (monthlySummary?.year !== Number(year) || loadedBranchId !== branchId)) fetchMonthlySummary()
+  }, [branchId, employeeView, fetchMonthlySummary, monthlySummary?.branch_id, monthlySummary?.year, year])
 
   const createEmployee = async () => {
     setActionLoading(true)
@@ -380,6 +400,7 @@ export default function SalariesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: employeeForm.name,
+          branch_id: employeeForm.branchId,
           document_type: employeeForm.documentType,
           document_number: employeeForm.documentNumber,
           aliases,
@@ -392,7 +413,7 @@ export default function SalariesPage() {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo crear el empleado')
       setSuccess(`Empleado creado: ${data.name}`)
-      setEmployeeForm(emptyEmployeeForm())
+      setEmployeeForm({ ...emptyEmployeeForm(), branchId: defaultBranchId })
       await Promise.all([
         fetchEmployees(),
         fetchSummary(),
@@ -418,6 +439,7 @@ export default function SalariesPage() {
     setEditEmployee(employee)
     setEditEmployeeForm({
       name: employee.name || '',
+      branchId: String(employee.branch_id || ''),
       documentType: employee.document_type || '',
       documentNumber: employee.document_number || '',
       aliases: (employee.aliases || []).join(', '),
@@ -443,6 +465,7 @@ export default function SalariesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: editEmployeeForm.name,
+          branch_id: editEmployeeForm.branchId,
           document_type: editEmployeeForm.documentType,
           document_number: editEmployeeForm.documentNumber,
           aliases,
@@ -573,10 +596,14 @@ export default function SalariesPage() {
   const accountDeductionRows = accountDeductions.employees || []
   const sources = summary?.sources || {}
   const latestBankDates = sources.latest_bank_dates || {}
-  const annualEmployeeRows = monthlySummary?.year === Number(year) ? (monthlySummary.employees || []) : []
+  const monthlyMatchesSelection = monthlySummary?.year === Number(year) && String(monthlySummary?.branch_id || '') === branchId
+  const annualEmployeeRows = monthlyMatchesSelection ? (monthlySummary.employees || []) : []
   const displayedEmployeeRows = employeeView === 'monthly' ? annualEmployeeRows : employeeRows
-  const activeEmployees = useMemo(() => employees.filter((employee) => employee.active), [employees])
-  const filteredEmployees = employees.filter((employee) => (
+  const employeesInBranch = useMemo(() => employees.filter((employee) => (
+    !branchId || String(employee.branch_id) === branchId
+  )), [branchId, employees])
+  const activeEmployees = useMemo(() => employeesInBranch.filter((employee) => employee.active), [employeesInBranch])
+  const filteredEmployees = employeesInBranch.filter((employee) => (
     employeeStatusFilter === 'all' || (employeeStatusFilter === 'active' ? employee.active : !employee.active)
   ))
 
@@ -604,6 +631,11 @@ export default function SalariesPage() {
   useEffect(() => {
     setMovementPage(0)
   }, [movementSearch, movementEmployee, movementSource, movementRowsPerPage, movements])
+
+  useEffect(() => {
+    setMovementEmployee('all')
+    setSelectedEmployeeId('')
+  }, [branchId])
 
   const selectedEmployee = displayedEmployeeRows.find((row) => row.employee_id === selectedEmployeeId) || null
   const movementEmployeeOptions = useMemo(() => {
@@ -686,6 +718,21 @@ export default function SalariesPage() {
       </Box>
 
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+        <FormControl sx={{ minWidth: 220 }} disabled={branchesLoading}>
+          <InputLabel id="salary-branch-label">Sucursal</InputLabel>
+          <Select
+            id="salary-branch"
+            labelId="salary-branch-label"
+            label="Sucursal"
+            value={branchId}
+            onChange={(event) => setBranchId(event.target.value)}
+          >
+            <MenuItem value="">Todas las sucursales</MenuItem>
+            {branches.map((branch) => (
+              <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
+            ))}
+          </Select>
+        </FormControl>
         <FormControl sx={{ minWidth: 150 }}>
           <InputLabel id="salary-year-label">Anio</InputLabel>
           <Select id="salary-year" labelId="salary-year-label" label="Anio" value={year} onChange={(event) => setYear(event.target.value)}>
@@ -708,6 +755,7 @@ export default function SalariesPage() {
       </Stack>
 
       {loading && <LinearProgress />}
+      {branchesError && <Alert severity="error">{branchesError}</Alert>}
       {error && <Alert severity="error">{error}</Alert>}
       {success && <Alert severity="success">{success}</Alert>}
 
@@ -810,7 +858,7 @@ export default function SalariesPage() {
             <Box>
               <Typography variant="h6" fontWeight={700}>Alta de empleado</Typography>
               <Typography variant="body2" color="text.secondary">
-                Los aliases ayudan a reconocer nombres en extractos, gastos y cuenta corriente.
+                Los aliases ayudan a reconocer nombres en extractos, gastos y cuenta corriente. La sucursal define donde trabaja el empleado.
               </Typography>
             </Box>
             <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(180px, 0.8fr) minmax(140px, 0.5fr) minmax(180px, 0.7fr) minmax(220px, 1fr)' }, gap: 2 }}>
@@ -819,6 +867,15 @@ export default function SalariesPage() {
                 value={employeeForm.name}
                 onChange={(event) => setEmployeeForm((prev) => ({ ...prev, name: event.target.value }))}
               />
+              <TextField
+                select
+                required
+                label="Sucursal"
+                value={employeeForm.branchId}
+                onChange={(event) => setEmployeeForm((prev) => ({ ...prev, branchId: event.target.value }))}
+              >
+                {branches.map((branch) => <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>)}
+              </TextField>
               <TextField
                 select
                 label="Tipo de documento"
@@ -876,7 +933,7 @@ export default function SalariesPage() {
               />
               <Button
                 variant="contained"
-                disabled={actionLoading || employeeForm.name.trim().length < 2 || Boolean(employeeForm.documentType) !== Boolean(employeeForm.documentNumber.trim())}
+                disabled={actionLoading || !employeeForm.branchId || employeeForm.name.trim().length < 2 || Boolean(employeeForm.documentType) !== Boolean(employeeForm.documentNumber.trim())}
                 onClick={createEmployee}
                 sx={{ minHeight: 44 }}
               >
@@ -894,7 +951,7 @@ export default function SalariesPage() {
               <Box>
                 <Typography variant="h6" fontWeight={700}>Resumen por empleado</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  {employeeView === 'monthly' ? `Acumulado y evolucion de ${year}` : `${MONTHS[Number(month) - 1]?.label} ${year}`}
+                  {employeeView === 'monthly' ? `Acumulado y evolucion de ${year}` : `${MONTHS[Number(month) - 1]?.label} ${year}`} - {selectedBranchName}
                 </Typography>
               </Box>
               <ToggleButtonGroup
@@ -1114,7 +1171,7 @@ export default function SalariesPage() {
             <Box>
               <Typography variant="h6" fontWeight={700}>Gestion de empleados</Typography>
               <Typography variant="caption" color="text.secondary">
-                {employees.filter((employee) => employee.active).length} activos y {employees.filter((employee) => !employee.active).length} de baja
+                {employeesInBranch.filter((employee) => employee.active).length} activos y {employeesInBranch.filter((employee) => !employee.active).length} de baja - {selectedBranchName}
               </Typography>
             </Box>
             <ToggleButtonGroup
@@ -1135,6 +1192,7 @@ export default function SalariesPage() {
               <TableHead>
                 <TableRow>
                   <TableCell>Empleado</TableCell>
+                  <TableCell>Sucursal</TableCell>
                   <TableCell>Documento</TableCell>
                   <TableCell>Ingreso</TableCell>
                   <TableCell>Cuenta corriente</TableCell>
@@ -1153,6 +1211,7 @@ export default function SalariesPage() {
                         {(employee.aliases || []).filter((alias) => alias.toLocaleLowerCase('es') !== employee.name.toLocaleLowerCase('es')).join(', ') || 'Sin aliases adicionales'}
                       </Typography>
                     </TableCell>
+                    <TableCell>{employee.branch_name || 'Sin sucursal'}</TableCell>
                     <TableCell>{formatDocument(employee)}</TableCell>
                     <TableCell>{employee.hire_date ? formatDate(employee.hire_date) : '-'}</TableCell>
                     <TableCell>{employee.account_client_name || 'Sin vincular'}</TableCell>
@@ -1189,7 +1248,7 @@ export default function SalariesPage() {
                 ))}
                 {!filteredEmployees.length && (
                   <TableRow>
-                      <TableCell colSpan={8}>
+                      <TableCell colSpan={9}>
                       <Typography color="text.secondary">No hay empleados en este estado.</Typography>
                     </TableCell>
                   </TableRow>
@@ -1366,6 +1425,15 @@ export default function SalariesPage() {
               onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, name: event.target.value }))}
             />
             <TextField
+              select
+              required
+              label="Sucursal"
+              value={editEmployeeForm.branchId}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, branchId: event.target.value }))}
+            >
+              {branches.map((branch) => <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>)}
+            </TextField>
+            <TextField
               label="Aliases separados por coma"
               value={editEmployeeForm.aliases}
               onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, aliases: event.target.value }))}
@@ -1426,7 +1494,7 @@ export default function SalariesPage() {
           <Button
             variant="contained"
             onClick={saveEmployee}
-            disabled={actionLoading || editEmployeeForm.name.trim().length < 2 || Boolean(editEmployeeForm.documentType) !== Boolean(editEmployeeForm.documentNumber.trim())}
+            disabled={actionLoading || !editEmployeeForm.branchId || editEmployeeForm.name.trim().length < 2 || Boolean(editEmployeeForm.documentType) !== Boolean(editEmployeeForm.documentNumber.trim())}
           >
             Guardar
           </Button>

@@ -9,7 +9,7 @@ from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from .models import AccountClient, Employee, EmployeeAlias, EmployeeMovement
+from .models import AccountClient, Branch, Employee, EmployeeAlias, EmployeeMovement
 from .salary_services import (
     aguinaldo_estimate,
     assign_employee_movement,
@@ -31,12 +31,30 @@ from .salary_services import (
 )
 
 
+def _active_branch(value, required=False):
+    if value in (None, ''):
+        if required:
+            raise ValueError('Sucursal requerida')
+        return None
+    try:
+        branch = Branch.objects.filter(pk=value, active=True).first()
+    except (TypeError, ValueError, ValidationError):
+        branch = None
+    if not branch:
+        raise ValueError('Sucursal invalida o inactiva')
+    return branch
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def salaries_dashboard(request):
     start, end = month_range(request.query_params.get('year'), request.query_params.get('month'))
     should_sync = (request.query_params.get('sync') or '1').strip().lower() not in {'0', 'false', 'no'}
-    return Response(salaries_summary(start, end, sync=should_sync))
+    try:
+        branch = _active_branch(request.query_params.get('branch_id'))
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(salaries_summary(start, end, sync=should_sync, branch_id=branch.id if branch else None))
 
 
 @api_view(['GET'])
@@ -49,7 +67,11 @@ def salaries_monthly(request):
     except (TypeError, ValueError):
         return Response({'detail': 'Anio invalido'}, status=status.HTTP_400_BAD_REQUEST)
     should_sync = (request.query_params.get('sync') or '1').strip().lower() not in {'0', 'false', 'no'}
-    return Response(salaries_monthly_summary(year, sync=should_sync))
+    try:
+        branch = _active_branch(request.query_params.get('branch_id'))
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(salaries_monthly_summary(year, sync=should_sync, branch_id=branch.id if branch else None))
 
 
 @api_view(['GET', 'PUT'])
@@ -57,7 +79,7 @@ def salaries_monthly(request):
 def salaries_aguinaldo(request):
     employee_id = request.query_params.get('employee_id')
     try:
-        employee = Employee.objects.select_related('account_client').prefetch_related('aliases').filter(pk=employee_id).first()
+        employee = Employee.objects.select_related('account_client', 'branch').prefetch_related('aliases').filter(pk=employee_id).first()
     except (TypeError, ValueError, ValidationError):
         employee = None
     if not employee:
@@ -109,7 +131,7 @@ def salaries_account_deductions_confirm(request):
 def employees_list(request):
     if request.method == 'GET':
         ensure_salary_category_employees()
-        employees = Employee.objects.select_related('account_client').prefetch_related('aliases').order_by('name')
+        employees = Employee.objects.select_related('account_client', 'branch').prefetch_related('aliases').order_by('name')
         return Response([employee_payload(employee) for employee in employees])
 
     data = request.data or {}
@@ -117,6 +139,7 @@ def employees_list(request):
     if data.get('account_client_id'):
         account_client = get_object_or_404(AccountClient, pk=data.get('account_client_id'))
     try:
+        branch = _active_branch(data.get('branch_id'), required=True) if 'branch_id' in data else None
         employee = create_employee(
             name=data.get('name'),
             aliases=data.get('aliases') if isinstance(data.get('aliases'), list) else [],
@@ -126,6 +149,7 @@ def employees_list(request):
             document_number=data.get('document_number') if 'document_number' in data else None,
             hire_date=data.get('hire_date'),
             account_discount_percent=data.get('account_discount_percent') if 'account_discount_percent' in data else None,
+            branch=branch,
         )
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -186,6 +210,10 @@ def employee_detail(request, pk):
                     raise ValueError('Ya existe otro empleado con ese nombre')
                 employee.name = name
                 updated_fields.append('name')
+
+            if 'branch_id' in data:
+                employee.branch = _active_branch(data.get('branch_id'), required=True)
+                updated_fields.append('branch')
 
             if 'document_type' in data or 'document_number' in data:
                 doc_type, doc_number = normalize_employee_document(

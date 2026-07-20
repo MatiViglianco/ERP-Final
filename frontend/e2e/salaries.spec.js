@@ -12,6 +12,20 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
 
   await expect(page.getByRole('heading', { name: 'Sueldos' })).toBeVisible()
   await expect(page.getByText('Total empleados')).toBeVisible()
+
+  const northResponse = page.waitForResponse((response) => response.url().includes('/api/salaries/summary/') && response.url().includes('branch_id=') && response.ok())
+  await page.locator('#salary-branch').click()
+  await page.getByRole('option', { name: 'E2E Norte', exact: true }).click()
+  await northResponse
+  const employeeSummary = page.getByRole('heading', { name: 'Resumen por empleado' }).locator('..').locator('..').locator('..')
+  await expect(employeeSummary.getByText('Nora Norte E2E', { exact: true })).toBeVisible()
+  await expect(employeeSummary.getByText('Diego E2E', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: '$ 5.000' }).first()).toBeVisible()
+
+  const centralResponse = page.waitForResponse((response) => response.url().includes('/api/salaries/summary/') && response.url().includes('branch_id=') && response.ok())
+  await page.locator('#salary-branch').click()
+  await page.getByRole('option', { name: 'E2E Central', exact: true }).click()
+  await centralResponse
   await expect(page.getByRole('cell', { name: 'Diego E2E', exact: true }).first()).toBeVisible()
   const detectedMovements = page.getByRole('heading', { name: 'Movimientos detectados' }).locator('..').locator('..')
   await expect(detectedMovements.getByText('Transferencia bancaria')).toBeVisible()
@@ -41,7 +55,6 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
   await aguinaldo.getByRole('button', { name: 'Guardar remuneraciones' }).click()
   await sacSaveResponse
   await expect(aguinaldo.getByRole('heading', { name: '$ 36.000' })).toBeVisible()
-  const employeeSummary = page.getByRole('heading', { name: 'Resumen por empleado' }).locator('..').locator('..').locator('..')
   await expect(detectedMovements.getByText('11 de 11 movimientos')).toBeVisible()
   await expect(detectedMovements.getByText('1-10 de 11')).toBeVisible()
   await detectedMovements.getByRole('button', { name: 'Go to next page' }).click()
@@ -68,7 +81,8 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
   await monthlyResponse
   await expect(page.getByText('Acumulado y evolucion de 2026')).toBeVisible()
   await expect(page.locator('canvas')).toBeVisible()
-  await expect(page.getByText(/JUAN CATEGORIA E2E/)).toBeVisible()
+  await expect(employeeSummary.getByRole('button', { name: 'Diego E2E' })).toBeVisible()
+  await expect(page.getByText(/JUAN CATEGORIA E2E/)).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Pendientes de identificar' })).toHaveCount(0)
 
   const employeeManagement = page.getByRole('heading', { name: 'Gestion de empleados' }).locator('..').locator('..').locator('..')
@@ -76,6 +90,7 @@ test('muestra sueldos por transferencias efectivo y cuenta corriente', async ({ 
   await expect(diegoRow.getByText('E2E, Diego')).toBeVisible()
   await diegoRow.getByRole('button', { name: 'Editar Diego E2E' }).click()
   const editDialog = page.getByRole('dialog', { name: 'Editar empleado' })
+  await expect(editDialog.getByLabel('Sucursal')).toHaveText(/E2E Central/)
   await expect(editDialog.getByLabel('Fecha de ingreso')).toHaveValue('2026-07-01')
   await expect(editDialog.getByLabel('Descuento cuenta corriente (%)')).toHaveValue('20')
   await editDialog.getByLabel('Tipo de documento').click()

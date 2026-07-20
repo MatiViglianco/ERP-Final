@@ -14,6 +14,7 @@ from statsapp.models import (
     AccountTransaction,
     BankTransaction,
     BankUploadBatch,
+    Branch,
     Employee,
     EmployeeAlias,
     EmployeeMovement,
@@ -110,6 +111,85 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['totals']['cash_expense'], 35000.0)
         self.assertEqual(response.data['employees'][0]['employee_name'], 'Diego Empleado')
+
+    def test_salaries_are_scoped_by_employee_branch_and_keep_historical_branch(self):
+        north = Branch.objects.create(name='Sucursal Norte Sueldos', slug='sucursal-norte-sueldos')
+        nora = create_employee('Nora Norte', aliases=['NORA NORTE'], branch=north)
+        ExpenseEntry.objects.create(
+            branch=self.employee.branch,
+            date=date(2026, 7, 10),
+            amount=Decimal('35000'),
+            method=ExpenseEntry.Method.CASH,
+            category='SUELDOS',
+            subcategory='DIEGO',
+        )
+        north_expense = ExpenseEntry.objects.create(
+            branch=north,
+            date=date(2026, 7, 10),
+            amount=Decimal('18000'),
+            method=ExpenseEntry.Method.CASH,
+            category='SUELDOS',
+            subcategory='NORA NORTE',
+        )
+
+        all_branches = salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+        primary_only = salaries_summary(
+            date(2026, 7, 1),
+            date(2026, 7, 31),
+            sync=False,
+            branch_id=self.employee.branch_id,
+        )
+        north_only = salaries_summary(
+            date(2026, 7, 1),
+            date(2026, 7, 31),
+            sync=False,
+            branch_id=north.id,
+        )
+
+        self.assertEqual(all_branches['totals']['cash_expense'], 53000.0)
+        self.assertEqual(primary_only['totals']['cash_expense'], 35000.0)
+        self.assertEqual([row['employee_name'] for row in north_only['employees']], ['Nora Norte'])
+        movement = EmployeeMovement.objects.get(expense_entry=north_expense)
+        self.assertEqual(movement.branch, north)
+
+        nora.branch = self.employee.branch
+        nora.save(update_fields=['branch'])
+        salaries_summary(date(2026, 7, 1), date(2026, 7, 31), sync=True)
+        movement.refresh_from_db()
+        self.assertEqual(movement.branch, north)
+        monthly = salaries_monthly_summary(2026, sync=False, branch_id=north.id)
+        self.assertEqual(monthly['branch_id'], north.id)
+        self.assertEqual([row['employee_name'] for row in monthly['employees']], ['Nora Norte'])
+
+    def test_employee_api_validates_and_updates_branch(self):
+        north = Branch.objects.create(name='Sucursal Norte API', slug='sucursal-norte-api')
+
+        created = self.api.post('/api/salaries/employees/', {
+            'name': 'Empleado Norte API',
+            'branch_id': north.id,
+        }, format='json')
+
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data['branch_id'], north.id)
+        self.assertEqual(created.data['branch_name'], north.name)
+        employee_id = created.data['id']
+
+        updated = self.api.patch(f'/api/salaries/employees/{employee_id}/', {
+            'branch_id': self.employee.branch_id,
+        }, format='json')
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data['branch_id'], self.employee.branch_id)
+
+        invalid = self.api.get('/api/salaries/summary/?year=2026&month=7&branch_id=999999')
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.data['detail'], 'Sucursal invalida o inactiva')
+
+        missing = self.api.post('/api/salaries/employees/', {
+            'name': 'Empleado sin sucursal',
+            'branch_id': '',
+        }, format='json')
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(missing.data['detail'], 'Sucursal requerida')
 
     def test_account_current_applies_employee_discount_to_salary_net(self):
         self.employee.account_discount_percent = Decimal('15.00')

@@ -13,6 +13,7 @@ from .models import (
     AccountClient,
     AccountTransaction,
     BankTransaction,
+    Branch,
     Employee,
     EmployeeAlias,
     EmployeeMovement,
@@ -157,11 +158,24 @@ def ensure_salary_category_employees():
         if not employee:
             employee, was_created = Employee.objects.get_or_create(
                 name=name,
-                defaults={'notes': 'Sincronizado desde Gastos / SUELDOS'},
+                defaults={
+                    'branch': default_employee_branch(),
+                    'notes': 'Sincronizado desde Gastos / SUELDOS',
+                },
             )
             created += 1 if was_created else 0
+        elif not employee.branch_id:
+            employee.branch = default_employee_branch()
+            employee.save(update_fields=['branch', 'updated_at'])
         ensure_employee_alias(employee, name)
     return {'configured': configured, 'created': created}
+
+
+def default_employee_branch():
+    return (
+        Branch.objects.filter(slug='sucursal-primaria', active=True).first()
+        or Branch.objects.filter(active=True).order_by('name', 'id').first()
+    )
 
 
 def month_range(year=None, month=None):
@@ -182,6 +196,8 @@ def employee_payload(employee):
         'id': str(employee.id),
         'name': employee.name,
         'active': employee.active,
+        'branch_id': employee.branch_id,
+        'branch_name': employee.branch.name if employee.branch else '',
         'document_type': employee.document_type or '',
         'document_type_label': employee.get_document_type_display() if employee.document_type else '',
         'document_number': employee.document_number or '',
@@ -202,6 +218,8 @@ def movement_payload(movement):
         'id': str(movement.id),
         'employee_id': str(movement.employee_id),
         'employee_name': movement.employee.name,
+        'branch_id': movement.branch_id,
+        'branch_name': movement.branch.name if movement.branch else '',
         'source': movement.source,
         'source_label': movement.get_source_display(),
         'status': movement.status,
@@ -246,7 +264,7 @@ def _latest_bank_dates():
     return dates
 
 
-def _salary_source_diagnostics(start_date, end_date, limit=100):
+def _salary_source_diagnostics(start_date, end_date, branch_id=None, limit=100):
     bank_period = BankTransaction.objects.filter(date__gte=start_date, date__lte=end_date)
     bank_candidates = (
         bank_period
@@ -259,12 +277,16 @@ def _salary_source_diagnostics(start_date, end_date, limit=100):
         date__lte=end_date,
         category__iexact=SALARY_CATEGORY,
     )
+    if branch_id:
+        cash_period = cash_period.filter(branch_id=branch_id)
     cash_candidates = cash_period.filter(employee_movement__isnull=True)
     account_period = AccountTransaction.objects.filter(
         date__gte=start_date,
         date__lte=end_date,
         original_amount__gt=0,
     )
+    if branch_id:
+        account_period = account_period.filter(branch_id=branch_id)
     account_candidates = (
         account_period
         .filter(employee_movement__isnull=True, client__employee_profile__isnull=True)
@@ -320,7 +342,7 @@ def _salary_source_diagnostics(start_date, end_date, limit=100):
     }
     return {
         'sources': {
-            'active_employees': Employee.objects.filter(active=True).count(),
+            'active_employees': Employee.objects.filter(active=True, **({'branch_id': branch_id} if branch_id else {})).count(),
             'bank_transactions': bank_period.count(),
             'bank_outgoing': bank_period.filter(amount__lt=0).count(),
             'salary_cash_expenses': cash_period.count(),
@@ -406,9 +428,16 @@ def _match_employee(text, matchers, match_documents=False):
     return None, ''
 
 
-def _movement_defaults(employee, source, movement_date, amount, description, alias):
+def _movement_branch(employee, existing=None):
+    if existing and existing.branch_id:
+        return existing.branch
+    return employee.branch or default_employee_branch()
+
+
+def _movement_defaults(employee, source, movement_date, amount, description, alias, existing=None):
     return {
         'employee': employee,
+        'branch': _movement_branch(employee, existing),
         'source': source,
         'status': EmployeeMovement.Status.AUTO,
         'date': movement_date,
@@ -434,7 +463,7 @@ def _account_deduction_values(account_transaction, discount_percent):
     return gross_amount, percent, discount_amount, net_amount
 
 
-def _account_movement_defaults(employee, account_transaction, alias, status=EmployeeMovement.Status.AUTO):
+def _account_movement_defaults(employee, account_transaction, alias, status=EmployeeMovement.Status.AUTO, existing=None):
     gross_amount, percent, discount_amount, net_amount = _account_deduction_values(
         account_transaction,
         employee.account_discount_percent,
@@ -446,6 +475,7 @@ def _account_movement_defaults(employee, account_transaction, alias, status=Empl
         amount=net_amount,
         description=f"Cuenta corriente: {account_transaction.description or account_transaction.external_id}",
         alias=alias,
+        existing=existing,
     )
     defaults.update({
         'status': status,
@@ -476,6 +506,7 @@ def _sync_employee_movements_once(start_date, end_date):
         )
         if not employee:
             continue
+        existing = EmployeeMovement.objects.select_related('branch').filter(bank_transaction=tx).first()
         defaults = _movement_defaults(
             employee=employee,
             source=EmployeeMovement.Source.BANK_TRANSFER,
@@ -483,6 +514,7 @@ def _sync_employee_movements_once(start_date, end_date):
             amount=Decimal(str(tx.amount or 0)),
             description=_bank_movement_description(tx),
             alias=alias,
+            existing=existing,
         )
         _, was_created = EmployeeMovement.objects.update_or_create(
             bank_transaction=tx,
@@ -503,6 +535,7 @@ def _sync_employee_movements_once(start_date, end_date):
         )
         if not employee:
             continue
+        existing = EmployeeMovement.objects.select_related('branch').filter(expense_entry=expense).first()
         defaults = _movement_defaults(
             employee=employee,
             source=EmployeeMovement.Source.CASH_EXPENSE,
@@ -510,6 +543,7 @@ def _sync_employee_movements_once(start_date, end_date):
             amount=expense.amount or Decimal('0'),
             description=f"{expense.method}: {expense.subcategory or expense.description}",
             alias=alias,
+            existing=existing,
         )
         _, was_created = EmployeeMovement.objects.update_or_create(
             expense_entry=expense,
@@ -549,10 +583,10 @@ def _sync_employee_movements_once(start_date, end_date):
             employee, alias = _match_employee(f"{tx.client.full_name if tx.client else ''} {tx.description}", matchers)
         if not employee:
             continue
-        existing = EmployeeMovement.objects.filter(account_transaction=tx).first()
+        existing = EmployeeMovement.objects.select_related('branch').filter(account_transaction=tx).first()
         if existing and existing.deduction_status == EmployeeMovement.DeductionStatus.CONFIRMED:
             continue
-        defaults = _account_movement_defaults(employee, tx, alias)
+        defaults = _account_movement_defaults(employee, tx, alias, existing=existing)
         _, was_created = EmployeeMovement.objects.update_or_create(
             account_transaction=tx,
             defaults=defaults,
@@ -579,7 +613,7 @@ def _sync_employee_movements_with_retry(start_date, end_date):
             sleep(_SYNC_RETRY_DELAYS[attempt])
 
 
-def salaries_summary(start_date, end_date, sync=True):
+def salaries_summary(start_date, end_date, sync=True, branch_id=None):
     employee_sync = ensure_salary_category_employees()
     if sync:
         with _SYNC_LOCK:
@@ -591,13 +625,15 @@ def salaries_summary(start_date, end_date, sync=True):
         sync_result = {'created': 0, 'updated': 0}
     qs = (
         EmployeeMovement.objects
-        .select_related('employee', 'bank_transaction', 'expense_entry', 'account_transaction__branch')
+        .select_related('employee__branch', 'branch', 'bank_transaction', 'expense_entry', 'account_transaction__branch')
         .filter(
             date__gte=start_date,
             date__lte=end_date,
             employee__active=True,
         )
     )
+    if branch_id:
+        qs = qs.filter(branch_id=branch_id)
     totals = {
         EmployeeMovement.Source.BANK_TRANSFER: Decimal('0'),
         EmployeeMovement.Source.CASH_EXPENSE: Decimal('0'),
@@ -699,6 +735,7 @@ def salaries_summary(start_date, end_date, sync=True):
             'start': start_date.isoformat(),
             'end': end_date.isoformat(),
         },
+        'branch_id': branch_id,
         'sync': sync_result,
         'employee_sync': employee_sync,
         'totals': {
@@ -719,11 +756,11 @@ def salaries_summary(start_date, end_date, sync=True):
             'confirmed_net_amount': float(account_deductions['confirmed_net_amount']),
             'employees': deduction_rows,
         },
-        **_salary_source_diagnostics(start_date, end_date),
+        **_salary_source_diagnostics(start_date, end_date, branch_id=branch_id),
     }
 
 
-def salaries_monthly_summary(year, sync=True):
+def salaries_monthly_summary(year, sync=True, branch_id=None):
     selected_year = int(year)
     start_date = date(selected_year, 1, 1)
     end_date = date(selected_year, 12, 31)
@@ -753,7 +790,7 @@ def salaries_monthly_summary(year, sync=True):
     })
     movements = (
         EmployeeMovement.objects
-        .select_related('employee')
+        .select_related('employee__branch', 'branch')
         .filter(
             date__gte=start_date,
             date__lte=end_date,
@@ -761,6 +798,8 @@ def salaries_monthly_summary(year, sync=True):
         )
         .order_by('employee__name', 'date')
     )
+    if branch_id:
+        movements = movements.filter(branch_id=branch_id)
     for movement in movements:
         amount = movement.amount or Decimal('0')
         entry = by_employee[movement.employee_id]
@@ -795,6 +834,7 @@ def salaries_monthly_summary(year, sync=True):
     employee_rows.sort(key=lambda item: item['total'], reverse=True)
     return {
         'year': selected_year,
+        'branch_id': branch_id,
         'sync': sync_result,
         'employee_sync': employee_sync,
         'employees': employee_rows,
@@ -1061,6 +1101,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
         if not tx:
             raise ValueError('Transferencia bancaria no encontrada')
         matched_alias = matched_alias or (tx.description or tx.concept or '').strip()
+        existing_movement = EmployeeMovement.objects.select_related('branch').filter(bank_transaction=tx).first()
         defaults = _movement_defaults(
             employee,
             source,
@@ -1068,6 +1109,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
             Decimal(str(tx.amount or 0)),
             _bank_movement_description(tx),
             matched_alias,
+            existing=existing_movement,
         )
         lookup = {'bank_transaction': tx}
     elif source == EmployeeMovement.Source.CASH_EXPENSE:
@@ -1075,6 +1117,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
         if not expense:
             raise ValueError('Gasto en efectivo no encontrado')
         matched_alias = matched_alias or (expense.subcategory or expense.description or '').strip()
+        existing_movement = EmployeeMovement.objects.select_related('branch').filter(expense_entry=expense).first()
         defaults = _movement_defaults(
             employee,
             source,
@@ -1082,6 +1125,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
             expense.amount or Decimal('0'),
             f"{expense.method}: {expense.subcategory or expense.description}",
             matched_alias,
+            existing=existing_movement,
         )
         lookup = {'expense_entry': expense}
     elif source == EmployeeMovement.Source.ACCOUNT_CURRENT:
@@ -1099,7 +1143,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
             employee.account_client = account_tx.client
             employee.save(update_fields=['account_client', 'updated_at'])
         matched_alias = matched_alias or account_tx.client.full_name
-        existing_movement = EmployeeMovement.objects.filter(account_transaction=account_tx).first()
+        existing_movement = EmployeeMovement.objects.select_related('branch').filter(account_transaction=account_tx).first()
         if existing_movement and existing_movement.deduction_status == EmployeeMovement.DeductionStatus.CONFIRMED:
             raise ValueError('El descuento de cuenta corriente ya fue confirmado')
         defaults = _account_movement_defaults(
@@ -1107,6 +1151,7 @@ def assign_employee_movement(employee, source, source_id, alias=''):
             account_tx,
             matched_alias,
             status=EmployeeMovement.Status.MANUAL,
+            existing=existing_movement,
         )
         lookup = {'account_transaction': account_tx}
     else:
@@ -1129,6 +1174,7 @@ def create_employee(
     document_number=None,
     hire_date=None,
     account_discount_percent=None,
+    branch=None,
 ):
     cleaned_name = (name or '').strip()
     if len(cleaned_name) < 2:
@@ -1138,6 +1184,10 @@ def create_employee(
     parsed_hire_date = normalize_hire_date(hire_date)
     discount_provided = account_discount_percent is not None
     parsed_discount = normalize_account_discount_percent(account_discount_percent) if discount_provided else Decimal('0.00')
+    existing_employee = Employee.objects.filter(name__iexact=cleaned_name).select_related('branch').first()
+    selected_branch = branch or (existing_employee.branch if existing_employee else None) or default_employee_branch()
+    if not selected_branch:
+        raise ValueError('No hay una sucursal activa para asignar al empleado')
     linked_document = find_employee_by_document_identity(
         doc_type,
         doc_number,
@@ -1145,7 +1195,6 @@ def create_employee(
     ) if doc_number else None
     if linked_document:
         raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
-    existing_employee = Employee.objects.filter(name__iexact=cleaned_name).first()
     validate_account_client_assignment(account_client, existing_employee)
     employee, _ = Employee.objects.get_or_create(
         name=cleaned_name,
@@ -1156,9 +1205,13 @@ def create_employee(
             'document_number': doc_number,
             'hire_date': parsed_hire_date,
             'account_discount_percent': parsed_discount,
+            'branch': selected_branch,
         },
     )
     changed = []
+    if employee.branch_id != selected_branch.id:
+        employee.branch = selected_branch
+        changed.append('branch')
     if account_client and employee.account_client_id != account_client.id:
         employee.account_client = account_client
         changed.append('account_client')

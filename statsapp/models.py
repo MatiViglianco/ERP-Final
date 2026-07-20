@@ -273,6 +273,13 @@ class Employee(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=160, unique=True)
     active = models.BooleanField(default=True)
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='employees',
+    )
     document_type = models.CharField(max_length=12, choices=DocumentType.choices, blank=True)
     document_number = models.CharField(max_length=16, unique=True, null=True, blank=True)
     account_client = models.OneToOneField(
@@ -294,6 +301,7 @@ class Employee(models.Model):
         ordering = ['name']
         indexes = [
             models.Index(fields=['active', 'name']),
+            models.Index(fields=['branch', 'active', 'name']),
         ]
         constraints = [
             models.CheckConstraint(
@@ -378,6 +386,13 @@ class EmployeeMovement(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='movements')
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='employee_movements',
+    )
     source = models.CharField(max_length=24, choices=Source.choices)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.AUTO)
     date = models.DateField()
@@ -425,6 +440,7 @@ class EmployeeMovement(models.Model):
         ordering = ['-date', '-created_at']
         indexes = [
             models.Index(fields=['employee', '-date']),
+            models.Index(fields=['branch', '-date']),
             models.Index(fields=['source', 'date']),
             models.Index(fields=['status']),
             models.Index(fields=['deduction_status', 'date']),
