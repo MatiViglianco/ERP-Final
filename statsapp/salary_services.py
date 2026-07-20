@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 from threading import Lock
 from time import sleep
@@ -15,6 +15,7 @@ from .models import (
     Employee,
     EmployeeAlias,
     EmployeeMovement,
+    EmployeeRemuneration,
     ExpenseEntry,
     ExpenseSubcategory,
 )
@@ -24,6 +25,10 @@ from .text_utils import normalize_search_text
 SALARY_CATEGORY = 'SUELDOS'
 _SYNC_LOCK = Lock()
 _SYNC_RETRY_DELAYS = (0.05, 0.15, 0.3)
+MONTH_LABELS = (
+    '', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+)
 
 
 def normalize_employee_document(document_type, document_number):
@@ -43,6 +48,18 @@ def normalize_employee_document(document_type, document_number):
     elif not _valid_cuil_cuit(number):
         raise ValueError('El CUIL/CUIT no es valido')
     return doc_type, number
+
+
+def normalize_hire_date(value):
+    if value is None or value == '':
+        return None
+    try:
+        parsed = date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError('Fecha de ingreso invalida') from exc
+    if parsed > timezone.localdate():
+        raise ValueError('La fecha de ingreso no puede ser futura')
+    return parsed
 
 
 def _valid_cuil_cuit(number):
@@ -133,6 +150,7 @@ def employee_payload(employee):
         'document_number': employee.document_number or '',
         'account_client_id': str(employee.account_client_id) if employee.account_client_id else None,
         'account_client_name': employee.account_client.full_name if employee.account_client else '',
+        'hire_date': employee.hire_date.isoformat() if employee.hire_date else None,
         'aliases': aliases,
         'termination_reason': employee.termination_reason or '',
         'termination_reason_label': employee.get_termination_reason_display() if employee.termination_reason else '',
@@ -597,6 +615,140 @@ def salaries_monthly_summary(year, sync=True):
     }
 
 
+def _semester_bounds(year, semester):
+    try:
+        selected_year = int(year)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Anio invalido') from exc
+    try:
+        selected_semester = int(semester)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Semestre invalido') from exc
+    if selected_year < 2000 or selected_year > 2100:
+        raise ValueError('Anio invalido')
+    if selected_semester not in {1, 2}:
+        raise ValueError('Semestre invalido')
+    if selected_semester == 1:
+        return selected_year, selected_semester, date(selected_year, 1, 1), date(selected_year, 6, 30), range(1, 7)
+    return selected_year, selected_semester, date(selected_year, 7, 1), date(selected_year, 12, 31), range(7, 13)
+
+
+def aguinaldo_estimate(employee, year, semester):
+    selected_year, selected_semester, start_date, end_date, semester_months = _semester_bounds(year, semester)
+    detected = {
+        row['date__month']: row['total'] or Decimal('0')
+        for row in (
+            EmployeeMovement.objects
+            .filter(employee=employee, date__gte=start_date, date__lte=end_date)
+            .values('date__month')
+            .annotate(total=Sum('amount'))
+        )
+    }
+    confirmed = {
+        row.month: row
+        for row in EmployeeRemuneration.objects.filter(
+            employee=employee,
+            year=selected_year,
+            month__in=semester_months,
+        ).select_related('confirmed_by')
+    }
+
+    months = []
+    effective_by_month = {}
+    for month_number in semester_months:
+        remuneration = confirmed.get(month_number)
+        detected_amount = detected.get(month_number, Decimal('0'))
+        effective_amount = remuneration.amount if remuneration else detected_amount
+        effective_by_month[month_number] = effective_amount
+        months.append({
+            'month': month_number,
+            'month_label': MONTH_LABELS[month_number],
+            'detected_amount': float(detected_amount),
+            'confirmed_amount': float(remuneration.amount) if remuneration else None,
+            'effective_amount': float(effective_amount),
+            'confirmed': bool(remuneration),
+            'confirmed_by': remuneration.confirmed_by.get_username() if remuneration and remuneration.confirmed_by else '',
+            'confirmed_at': remuneration.confirmed_at.isoformat() if remuneration else None,
+        })
+
+    period_start = max(start_date, employee.hire_date) if employee.hire_date else start_date
+    period_end = min(end_date, employee.termination_date) if employee.termination_date else end_date
+    semester_days = Decimal((end_date - start_date).days + 1)
+    worked_days = Decimal(max((period_end - period_start).days + 1, 0)) if period_start <= period_end else Decimal('0')
+    proportion = worked_days / semester_days if semester_days else Decimal('0')
+    eligible_months = [
+        item for item in months
+        if date(selected_year, item['month'], 1) <= period_end
+        and month_range(selected_year, item['month'])[1] >= period_start
+    ] if worked_days else []
+    best_month = max(eligible_months, key=lambda item: (effective_by_month[item['month']], -item['month'])) if eligible_months else None
+    best_remuneration = effective_by_month[best_month['month']] if best_month else Decimal('0')
+    sac_amount = (best_remuneration / Decimal('2') * proportion).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    return {
+        'employee': employee_payload(employee),
+        'year': selected_year,
+        'semester': selected_semester,
+        'period': {'start': start_date.isoformat(), 'end': end_date.isoformat()},
+        'months': months,
+        'best_month': best_month['month'] if best_month else None,
+        'best_month_label': best_month['month_label'] if best_month else 'Sin datos',
+        'best_remuneration': float(best_remuneration),
+        'worked_days': int(worked_days),
+        'semester_days': int(semester_days),
+        'proportion': float(proportion),
+        'sac_amount': float(sac_amount),
+        'confirmed_months': sum(1 for item in eligible_months if item['confirmed']),
+        'required_months': len(eligible_months),
+        'complete': all(item['confirmed'] for item in eligible_months),
+        'employment_period_confirmed': employee.hire_date is not None,
+    }
+
+
+@transaction.atomic
+def save_aguinaldo_remunerations(employee, year, semester, rows, user=None):
+    selected_year, _, _, _, semester_months = _semester_bounds(year, semester)
+    allowed_months = set(semester_months)
+    if not isinstance(rows, list):
+        raise ValueError('Remuneraciones invalidas')
+    seen_months = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Remuneracion invalida')
+        try:
+            month_number = int(row.get('month'))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('Mes invalido') from exc
+        if month_number not in allowed_months or month_number in seen_months:
+            raise ValueError('Mes invalido o repetido')
+        seen_months.add(month_number)
+        raw_amount = row.get('amount')
+        if raw_amount is None or raw_amount == '':
+            EmployeeRemuneration.objects.filter(
+                employee=employee,
+                year=selected_year,
+                month=month_number,
+            ).delete()
+            continue
+        try:
+            amount = Decimal(str(raw_amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError('Importe de remuneracion invalido') from exc
+        if amount < 0 or amount > Decimal('999999999999.99'):
+            raise ValueError('Importe de remuneracion fuera de rango')
+        EmployeeRemuneration.objects.update_or_create(
+            employee=employee,
+            year=selected_year,
+            month=month_number,
+            defaults={
+                'amount': amount,
+                'confirmed_by': user if getattr(user, 'is_authenticated', False) else None,
+                'confirmed_at': timezone.now(),
+            },
+        )
+    return aguinaldo_estimate(employee, selected_year, semester)
+
+
 @transaction.atomic
 def assign_employee_movement(employee, source, source_id, alias=''):
     if not employee.active:
@@ -664,12 +816,13 @@ def assign_employee_movement(employee, source, source_id, alias=''):
 
 
 @transaction.atomic
-def create_employee(name, aliases=None, account_client=None, notes='', document_type=None, document_number=None):
+def create_employee(name, aliases=None, account_client=None, notes='', document_type=None, document_number=None, hire_date=None):
     cleaned_name = (name or '').strip()
     if len(cleaned_name) < 2:
         raise ValueError('Nombre de empleado requerido')
     document_provided = document_type is not None or document_number is not None
     doc_type, doc_number = normalize_employee_document(document_type, document_number) if document_provided else ('', None)
+    parsed_hire_date = normalize_hire_date(hire_date)
     linked_document = Employee.objects.filter(document_number=doc_number).exclude(name__iexact=cleaned_name).first() if doc_number else None
     if linked_document:
         raise ValueError(f'El documento ya esta vinculado a {linked_document.name}')
@@ -682,6 +835,7 @@ def create_employee(name, aliases=None, account_client=None, notes='', document_
             'notes': notes or '',
             'document_type': doc_type,
             'document_number': doc_number,
+            'hire_date': parsed_hire_date,
         },
     )
     changed = []
@@ -697,6 +851,9 @@ def create_employee(name, aliases=None, account_client=None, notes='', document_
     if document_provided and employee.document_number != doc_number:
         employee.document_number = doc_number
         changed.append('document_number')
+    if parsed_hire_date and employee.hire_date != parsed_hire_date:
+        employee.hire_date = parsed_hire_date
+        changed.append('hire_date')
     if changed:
         employee.save(update_fields=changed + ['updated_at'])
 

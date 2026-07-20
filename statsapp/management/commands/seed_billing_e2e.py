@@ -12,6 +12,7 @@ from statsapp.models import (
     Branch,
     Employee,
     EmployeeMovement,
+    EmployeeRemuneration,
     ExpenseCategory,
     ExpenseEntry,
     ExpenseSubcategory,
@@ -36,6 +37,7 @@ class Command(BaseCommand):
         Invoice.objects.filter(client__external_id='E2E-CLIENTE-FACT').delete()
         AccountTransaction.objects.filter(external_id='E2E-TX-FACT-1').delete()
         EmployeeMovement.objects.all().delete()
+        EmployeeRemuneration.objects.filter(employee__name__in=['Diego E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']).delete()
         Employee.objects.filter(name__in=['Diego E2E', 'JUAN CATEGORIA E2E', 'Juan Interno E2E']).delete()
         ExpenseEntry.objects.filter(external_id='E2E-SUELDO-EFECTIVO').delete()
         BankUploadBatch.objects.filter(original_filename='e2e-sueldos.csv').delete()
@@ -118,7 +120,19 @@ class Command(BaseCommand):
                 'status': AccountClient.Status.ACTIVE,
             },
         )
-        create_employee('Diego E2E', aliases=['DIEGO E2E', 'DIEGO'], account_client=employee_client)
+        diego_employee = create_employee(
+            'Diego E2E',
+            aliases=['DIEGO E2E', 'DIEGO'],
+            account_client=employee_client,
+            hire_date=date(2026, 7, 1),
+        )
+        EmployeeRemuneration.objects.create(
+            employee=diego_employee,
+            year=2026,
+            month=7,
+            amount=Decimal('70000'),
+            confirmed_by=user,
+        )
         salary_category, _ = ExpenseCategory.objects.get_or_create(name='SUELDOS')
         ExpenseSubcategory.objects.get_or_create(category=salary_category, name='JUAN CATEGORIA E2E')
         salary_batch = BankUploadBatch.objects.create(

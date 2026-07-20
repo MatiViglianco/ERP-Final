@@ -40,6 +40,8 @@ import SyncIcon from '@mui/icons-material/Sync'
 import EditIcon from '@mui/icons-material/Edit'
 import PersonOffIcon from '@mui/icons-material/PersonOff'
 import RestoreIcon from '@mui/icons-material/Restore'
+import CalculateIcon from '@mui/icons-material/Calculate'
+import SaveIcon from '@mui/icons-material/Save'
 import { Bar, Doughnut } from 'react-chartjs-2'
 import { ArcElement, BarElement, CategoryScale, Chart, Legend, LinearScale, Tooltip as ChartTooltip } from 'chart.js'
 import { useAuth } from '../context/AuthContext.jsx'
@@ -49,6 +51,7 @@ Chart.register(ArcElement, BarElement, CategoryScale, LinearScale, ChartTooltip,
 
 const API_SALARIES_SUMMARY = `${API_BASE}/salaries/summary/`
 const API_SALARIES_MONTHLY = `${API_BASE}/salaries/monthly/`
+const API_SALARIES_AGUINALDO = `${API_BASE}/salaries/aguinaldo/`
 const API_EMPLOYEES = `${API_BASE}/salaries/employees/`
 const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 
@@ -102,8 +105,16 @@ const emptyEmployeeForm = () => ({
   documentNumber: '',
   aliases: '',
   accountClient: null,
+  hireDate: '',
   notes: '',
 })
+
+function buildRemunerationDraft(data) {
+  return Object.fromEntries((data?.months || []).map((item) => [
+    String(item.month),
+    item.confirmed_amount ?? (item.detected_amount > 0 ? item.detected_amount : ''),
+  ]))
+}
 
 function localIsoDate() {
   const now = new Date()
@@ -164,6 +175,12 @@ export default function SalariesPage() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [monthlySummary, setMonthlySummary] = useState(null)
+  const [sacEmployeeId, setSacEmployeeId] = useState('')
+  const [sacSemester, setSacSemester] = useState(now.getMonth() < 6 ? '1' : '2')
+  const [sacData, setSacData] = useState(null)
+  const [sacDraft, setSacDraft] = useState({})
+  const [sacLoading, setSacLoading] = useState(false)
+  const [sacSaving, setSacSaving] = useState(false)
   const [employeeView, setEmployeeView] = useState('composition')
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
   const [movementSearch, setMovementSearch] = useState('')
@@ -217,6 +234,29 @@ export default function SalariesPage() {
     }
   }, [authFetch, year])
 
+  const fetchAguinaldo = useCallback(async () => {
+    if (!sacEmployeeId) {
+      setSacData(null)
+      setSacDraft({})
+      return
+    }
+    setSacLoading(true)
+    setError('')
+    try {
+      const params = new URLSearchParams({ employee_id: sacEmployeeId, year, semester: sacSemester })
+      const resp = await authFetch(`${API_SALARIES_AGUINALDO}?${params.toString()}`)
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo calcular el aguinaldo')
+      setSacData(data)
+      setSacDraft(buildRemunerationDraft(data))
+    } catch (err) {
+      setError(err.message)
+      setSacData(null)
+    } finally {
+      setSacLoading(false)
+    }
+  }, [authFetch, sacEmployeeId, sacSemester, year])
+
   const fetchEmployees = useCallback(async () => {
     try {
       const [employeesResp, clientsResp] = await Promise.all([
@@ -266,6 +306,10 @@ export default function SalariesPage() {
     fetchEmployees()
   }, [fetchEmployees])
 
+  useEffect(() => {
+    fetchAguinaldo()
+  }, [fetchAguinaldo])
+
   useEffect(() => () => {
     if (accountSearchTimer.current) clearTimeout(accountSearchTimer.current)
   }, [])
@@ -292,6 +336,7 @@ export default function SalariesPage() {
           document_number: employeeForm.documentNumber,
           aliases,
           account_client_id: employeeForm.accountClient?.id || null,
+          hire_date: employeeForm.hireDate || null,
           notes: employeeForm.notes,
         }),
       })
@@ -328,6 +373,7 @@ export default function SalariesPage() {
       documentNumber: employee.document_number || '',
       aliases: (employee.aliases || []).join(', '),
       accountClient: linkedClient,
+      hireDate: employee.hire_date || '',
       notes: employee.notes || '',
     })
   }
@@ -351,6 +397,7 @@ export default function SalariesPage() {
           document_number: editEmployeeForm.documentNumber,
           aliases,
           account_client_id: editEmployeeForm.accountClient?.id || null,
+          hire_date: editEmployeeForm.hireDate || null,
           notes: editEmployeeForm.notes,
         }),
       })
@@ -362,11 +409,40 @@ export default function SalariesPage() {
         fetchEmployees(),
         fetchSummary(),
         employeeView === 'monthly' ? fetchMonthlySummary() : Promise.resolve(),
+        editEmployee.id === sacEmployeeId ? fetchAguinaldo() : Promise.resolve(),
       ])
     } catch (err) {
       setError(err.message)
     } finally {
       setActionLoading(false)
+    }
+  }
+
+  const saveAguinaldoRemunerations = async () => {
+    if (!sacEmployeeId || !sacData) return
+    setSacSaving(true)
+    setError('')
+    setSuccess('')
+    try {
+      const params = new URLSearchParams({ employee_id: sacEmployeeId, year, semester: sacSemester })
+      const remunerations = sacData.months.map((item) => ({
+        month: item.month,
+        amount: sacDraft[String(item.month)] === '' ? null : sacDraft[String(item.month)],
+      }))
+      const resp = await authFetch(`${API_SALARIES_AGUINALDO}?${params.toString()}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ remunerations }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudieron guardar las remuneraciones')
+      setSacData(data)
+      setSacDraft(buildRemunerationDraft(data))
+      setSuccess(`Remuneraciones actualizadas: ${data.employee.name}`)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSacSaving(false)
     }
   }
 
@@ -418,6 +494,7 @@ export default function SalariesPage() {
   const latestBankDates = sources.latest_bank_dates || {}
   const annualEmployeeRows = monthlySummary?.year === Number(year) ? (monthlySummary.employees || []) : []
   const displayedEmployeeRows = employeeView === 'monthly' ? annualEmployeeRows : employeeRows
+  const activeEmployees = useMemo(() => employees.filter((employee) => employee.active), [employees])
   const filteredEmployees = employees.filter((employee) => (
     employeeStatusFilter === 'all' || (employeeStatusFilter === 'active' ? employee.active : !employee.active)
   ))
@@ -431,6 +508,17 @@ export default function SalariesPage() {
       setSelectedEmployeeId(displayedEmployeeRows[0].employee_id)
     }
   }, [displayedEmployeeRows, selectedEmployeeId])
+
+  useEffect(() => {
+    if (!activeEmployees.length) {
+      setSacEmployeeId('')
+      return
+    }
+    if (!activeEmployees.some((employee) => employee.id === sacEmployeeId)) {
+      const selectedIsActive = activeEmployees.some((employee) => employee.id === selectedEmployeeId)
+      setSacEmployeeId(selectedIsActive ? selectedEmployeeId : activeEmployees[0].id)
+    }
+  }, [activeEmployees, sacEmployeeId, selectedEmployeeId])
 
   useEffect(() => {
     setMovementPage(0)
@@ -561,6 +649,134 @@ export default function SalariesPage() {
 
       <Card>
         <CardContent>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'center' }} spacing={2}>
+            <Stack direction="row" spacing={1.25} alignItems="center">
+              <CalculateIcon color="primary" />
+              <Box>
+                <Typography variant="h6" fontWeight={700}>Aguinaldo estimado</Typography>
+                <Typography variant="caption" color="text.secondary">Sueldo Anual Complementario</Typography>
+              </Box>
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+              <FormControl size="small" sx={{ minWidth: 220 }}>
+                <InputLabel id="sac-employee-label">Empleado</InputLabel>
+                <Select
+                  labelId="sac-employee-label"
+                  label="Empleado"
+                  value={activeEmployees.some((employee) => employee.id === sacEmployeeId) ? sacEmployeeId : ''}
+                  onChange={(event) => setSacEmployeeId(event.target.value)}
+                >
+                  {activeEmployees.map((employee) => (
+                    <MenuItem key={employee.id} value={employee.id}>{employee.name}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={sacSemester}
+                onChange={(_event, value) => value && setSacSemester(value)}
+                aria-label="Semestre del aguinaldo"
+              >
+                <ToggleButton value="1">Ene-Jun</ToggleButton>
+                <ToggleButton value="2">Jul-Dic</ToggleButton>
+              </ToggleButtonGroup>
+            </Stack>
+          </Stack>
+
+          {sacLoading && <LinearProgress sx={{ mt: 2 }} />}
+          {!activeEmployees.length && <Alert severity="warning" sx={{ mt: 2 }}>No hay empleados activos.</Alert>}
+          {sacData && !sacLoading && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Importe estimado</Typography>
+                  <Typography variant="h4" fontWeight={800}>{formatCurrency(sacData.sac_amount)}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Mejor remuneracion</Typography>
+                  <Typography variant="h6" fontWeight={700}>{formatCurrency(sacData.best_remuneration)}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Mes base</Typography>
+                  <Typography variant="h6" fontWeight={700}>{sacData.best_month_label}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Proporcionalidad</Typography>
+                  <Typography variant="h6" fontWeight={700}>
+                    {(Number(sacData.proportion || 0) * 100).toLocaleString('es-AR', { maximumFractionDigits: 1 })}%
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">{sacData.worked_days} de {sacData.semester_days} dias</Typography>
+                </Box>
+              </Box>
+
+              <Stack spacing={1} sx={{ mt: 2 }}>
+                {!sacData.employment_period_confirmed && (
+                  <Alert severity="warning">Falta la fecha de ingreso. La proporcionalidad considera el semestre completo.</Alert>
+                )}
+                {!sacData.complete && (
+                  <Alert severity="info">{sacData.confirmed_months} de {sacData.required_months} remuneraciones confirmadas. Los meses restantes usan importes detectados.</Alert>
+                )}
+              </Stack>
+
+              <TableContainer sx={{ mt: 2 }}>
+                <Table size="small" sx={{ minWidth: 720 }}>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Mes</TableCell>
+                      <TableCell align="right">Detectado</TableCell>
+                      <TableCell>Remuneracion computable</TableCell>
+                      <TableCell align="right">Usado en calculo</TableCell>
+                      <TableCell>Estado</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {sacData.months.map((item) => (
+                      <TableRow key={item.month}>
+                        <TableCell>{item.month_label}</TableCell>
+                        <TableCell align="right">{formatCurrency(item.detected_amount)}</TableCell>
+                        <TableCell sx={{ width: 240 }}>
+                          <TextField
+                            size="small"
+                            type="number"
+                            value={sacDraft[String(item.month)] ?? ''}
+                            placeholder={String(item.detected_amount || 0)}
+                            onChange={(event) => setSacDraft((prev) => ({ ...prev, [String(item.month)]: event.target.value }))}
+                            slotProps={{ htmlInput: { min: 0, step: '0.01', 'aria-label': `Remuneracion computable ${item.month_label}` } }}
+                            fullWidth
+                          />
+                        </TableCell>
+                        <TableCell align="right">{formatCurrency(item.effective_amount)}</TableCell>
+                        <TableCell>
+                          <Chip
+                            size="small"
+                            color={item.confirmed ? 'success' : 'default'}
+                            label={item.confirmed ? 'Confirmada' : 'Sugerida'}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+                <Button
+                  variant="contained"
+                  startIcon={<SaveIcon />}
+                  onClick={saveAguinaldoRemunerations}
+                  disabled={sacSaving || sacLoading}
+                >
+                  Guardar remuneraciones
+                </Button>
+              </Stack>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent>
           <Stack spacing={2}>
             <Box>
               <Typography variant="h6" fontWeight={700}>Alta de empleado</Typography>
@@ -593,6 +809,13 @@ export default function SalariesPage() {
                 disabled={!employeeForm.documentType}
                 onChange={(event) => setEmployeeForm((prev) => ({ ...prev, documentNumber: event.target.value }))}
                 slotProps={{ htmlInput: { inputMode: 'numeric' } }}
+              />
+              <TextField
+                type="date"
+                label="Fecha de ingreso"
+                value={employeeForm.hireDate}
+                onChange={(event) => setEmployeeForm((prev) => ({ ...prev, hireDate: event.target.value }))}
+                slotProps={{ inputLabel: { shrink: true } }}
               />
               <TextField
                 label="Aliases separados por coma"
@@ -668,14 +891,20 @@ export default function SalariesPage() {
                       key={row.employee_id}
                       hover
                       selected={row.employee_id === selectedEmployeeId}
-                      onClick={() => setSelectedEmployeeId(row.employee_id)}
+                      onClick={() => {
+                        setSelectedEmployeeId(row.employee_id)
+                        setSacEmployeeId(row.employee_id)
+                      }}
                       sx={{ cursor: 'pointer' }}
                     >
                       <TableCell>
                         <Button
                           size="small"
                           color="inherit"
-                          onClick={() => setSelectedEmployeeId(row.employee_id)}
+                          onClick={() => {
+                            setSelectedEmployeeId(row.employee_id)
+                            setSacEmployeeId(row.employee_id)
+                          }}
                           sx={{ minWidth: 0, px: 0, fontWeight: row.employee_id === selectedEmployeeId ? 800 : 600 }}
                         >
                           {row.employee_name}
@@ -847,6 +1076,7 @@ export default function SalariesPage() {
                 <TableRow>
                   <TableCell>Empleado</TableCell>
                   <TableCell>Documento</TableCell>
+                  <TableCell>Ingreso</TableCell>
                   <TableCell>Cuenta corriente</TableCell>
                   <TableCell>Estado</TableCell>
                   <TableCell>Fecha de baja</TableCell>
@@ -863,6 +1093,7 @@ export default function SalariesPage() {
                       </Typography>
                     </TableCell>
                     <TableCell>{formatDocument(employee)}</TableCell>
+                    <TableCell>{employee.hire_date ? formatDate(employee.hire_date) : '-'}</TableCell>
                     <TableCell>{employee.account_client_name || 'Sin vincular'}</TableCell>
                     <TableCell>
                       <Chip
@@ -896,7 +1127,7 @@ export default function SalariesPage() {
                 ))}
                 {!filteredEmployees.length && (
                   <TableRow>
-                    <TableCell colSpan={6}>
+                    <TableCell colSpan={7}>
                       <Typography color="text.secondary">No hay empleados en este estado.</Typography>
                     </TableCell>
                   </TableRow>
@@ -940,6 +1171,13 @@ export default function SalariesPage() {
               disabled={!editEmployeeForm.documentType}
               onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, documentNumber: event.target.value }))}
               slotProps={{ htmlInput: { inputMode: 'numeric' } }}
+            />
+            <TextField
+              type="date"
+              label="Fecha de ingreso"
+              value={editEmployeeForm.hireDate}
+              onChange={(event) => setEditEmployeeForm((prev) => ({ ...prev, hireDate: event.target.value }))}
+              slotProps={{ inputLabel: { shrink: true } }}
             />
             <Autocomplete
               options={clients}

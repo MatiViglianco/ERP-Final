@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from .models import AccountClient, Employee, EmployeeAlias, EmployeeMovement
 from .salary_services import (
+    aguinaldo_estimate,
     assign_employee_movement,
     create_employee,
     employee_payload,
@@ -18,6 +19,8 @@ from .salary_services import (
     ensure_employee_alias,
     month_range,
     movement_payload,
+    normalize_hire_date,
+    save_aguinaldo_remunerations,
     salaries_monthly_summary,
     salaries_summary,
     normalize_employee_document,
@@ -46,6 +49,34 @@ def salaries_monthly(request):
     return Response(salaries_monthly_summary(year, sync=should_sync))
 
 
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAdminUser])
+def salaries_aguinaldo(request):
+    employee_id = request.query_params.get('employee_id')
+    try:
+        employee = Employee.objects.select_related('account_client').prefetch_related('aliases').filter(pk=employee_id).first()
+    except (TypeError, ValueError, ValidationError):
+        employee = None
+    if not employee:
+        return Response({'detail': 'Empleado invalido'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        year = int(request.query_params.get('year'))
+        semester = int(request.query_params.get('semester'))
+        if request.method == 'PUT':
+            result = save_aguinaldo_remunerations(
+                employee,
+                year,
+                semester,
+                (request.data or {}).get('remunerations'),
+                user=request.user,
+            )
+        else:
+            result = aguinaldo_estimate(employee, year, semester)
+    except (TypeError, ValueError) as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(result)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAdminUser])
 def employees_list(request):
@@ -66,6 +97,7 @@ def employees_list(request):
             notes=data.get('notes') or '',
             document_type=data.get('document_type') if 'document_type' in data else None,
             document_number=data.get('document_number') if 'document_number' in data else None,
+            hire_date=data.get('hire_date'),
         )
     except ValueError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -159,6 +191,8 @@ def employee_detail(request, pk):
                         raise ValueError('Fecha de baja invalida') from exc
                     if termination_date > timezone.localdate():
                         raise ValueError('La fecha de baja no puede ser futura')
+                    if employee.hire_date and termination_date < employee.hire_date:
+                        raise ValueError('La fecha de baja no puede ser anterior al ingreso')
                     employee.termination_reason = reason
                     employee.termination_date = termination_date
                     updated_fields.extend(['termination_reason', 'termination_date'])
@@ -166,6 +200,12 @@ def employee_detail(request, pk):
             if 'notes' in data:
                 employee.notes = data.get('notes') or ''
                 updated_fields.append('notes')
+            if 'hire_date' in data:
+                hire_date = normalize_hire_date(data.get('hire_date'))
+                if employee.termination_date and hire_date and hire_date > employee.termination_date:
+                    raise ValueError('La fecha de ingreso no puede ser posterior a la baja')
+                employee.hire_date = hire_date
+                updated_fields.append('hire_date')
             if 'account_client_id' in data:
                 account_client_id = data.get('account_client_id')
                 account_client = None

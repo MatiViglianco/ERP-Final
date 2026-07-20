@@ -281,6 +281,7 @@ class Employee(models.Model):
         blank=True,
         related_name='employee_profile',
     )
+    hire_date = models.DateField(null=True, blank=True)
     termination_reason = models.CharField(max_length=16, choices=TerminationReason.choices, blank=True)
     termination_date = models.DateField(null=True, blank=True)
     notes = models.TextField(blank=True)
@@ -295,6 +296,38 @@ class Employee(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class EmployeeRemuneration(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='remunerations')
+    year = models.PositiveSmallIntegerField()
+    month = models.PositiveSmallIntegerField()
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='confirmed_employee_remunerations',
+    )
+    confirmed_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-year', '-month', 'employee__name']
+        constraints = [
+            models.UniqueConstraint(fields=['employee', 'year', 'month'], name='unique_employee_remuneration_month'),
+            models.CheckConstraint(check=models.Q(month__gte=1, month__lte=12), name='employee_remuneration_valid_month'),
+            models.CheckConstraint(check=models.Q(amount__gte=0), name='employee_remuneration_nonnegative'),
+        ]
+        indexes = [
+            models.Index(fields=['employee', 'year', 'month']),
+        ]
+
+    def __str__(self):
+        return f"{self.employee.name} {self.year}-{self.month:02d} {self.amount}"
 
 
 class EmployeeAlias(models.Model):

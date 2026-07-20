@@ -16,14 +16,17 @@ from statsapp.models import (
     Employee,
     EmployeeAlias,
     EmployeeMovement,
+    EmployeeRemuneration,
     ExpenseCategory,
     ExpenseEntry,
     ExpenseSubcategory,
 )
 from statsapp.salary_services import (
+    aguinaldo_estimate,
     create_employee,
     salaries_monthly_summary,
     salaries_summary,
+    save_aguinaldo_remunerations,
     sync_employee_movements,
 )
 
@@ -207,6 +210,83 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(invalid.data['detail'], 'Anio invalido')
         self.assertEqual(valid.status_code, 200)
         self.assertEqual(valid.data['year'], 2026)
+
+    def test_aguinaldo_uses_detected_amounts_until_remunerations_are_confirmed(self):
+        EmployeeMovement.objects.create(
+            employee=self.employee,
+            source=EmployeeMovement.Source.BANK_TRANSFER,
+            date=date(2026, 3, 10),
+            amount=Decimal('100000'),
+        )
+        EmployeeMovement.objects.create(
+            employee=self.employee,
+            source=EmployeeMovement.Source.CASH_EXPENSE,
+            date=date(2026, 4, 10),
+            amount=Decimal('150000'),
+        )
+
+        suggested = aguinaldo_estimate(self.employee, 2026, 1)
+        confirmed = save_aguinaldo_remunerations(
+            self.employee,
+            2026,
+            1,
+            [{'month': 4, 'amount': '120000'}],
+            user=self.user,
+        )
+
+        self.assertEqual(suggested['best_month'], 4)
+        self.assertEqual(suggested['sac_amount'], 75000.0)
+        self.assertFalse(suggested['complete'])
+        self.assertEqual(confirmed['best_month'], 4)
+        self.assertEqual(confirmed['best_remuneration'], 120000.0)
+        self.assertEqual(confirmed['sac_amount'], 60000.0)
+        april = next(item for item in confirmed['months'] if item['month'] == 4)
+        self.assertTrue(april['confirmed'])
+        self.assertEqual(april['confirmed_by'], 'admin')
+
+    def test_aguinaldo_endpoint_saves_values_and_prorates_by_employment_dates(self):
+        self.employee.hire_date = date(2026, 3, 1)
+        self.employee.save(update_fields=['hire_date'])
+        response = self.api.put(
+            f'/api/salaries/aguinaldo/?employee_id={self.employee.id}&year=2026&semester=1',
+            {
+                'remunerations': [
+                    {'month': 3, 'amount': '100000'},
+                    {'month': 4, 'amount': '120000'},
+                    {'month': 5, 'amount': '110000'},
+                    {'month': 6, 'amount': '130000'},
+                ],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['best_month_label'], 'Junio')
+        self.assertEqual(response.data['best_remuneration'], 130000.0)
+        self.assertEqual(response.data['worked_days'], 122)
+        self.assertEqual(response.data['semester_days'], 181)
+        self.assertEqual(response.data['sac_amount'], 43812.15)
+        self.assertEqual(response.data['confirmed_months'], 4)
+        self.assertEqual(response.data['required_months'], 4)
+        self.assertTrue(response.data['complete'])
+        self.assertTrue(response.data['employment_period_confirmed'])
+        self.assertEqual(EmployeeRemuneration.objects.filter(employee=self.employee, year=2026).count(), 4)
+
+        fetched = self.api.get(f'/api/salaries/aguinaldo/?employee_id={self.employee.id}&year=2026&semester=1')
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.data['sac_amount'], 43812.15)
+
+    def test_aguinaldo_rejects_negative_or_repeated_months(self):
+        endpoint = f'/api/salaries/aguinaldo/?employee_id={self.employee.id}&year=2026&semester=1'
+        negative = self.api.put(endpoint, {'remunerations': [{'month': 1, 'amount': '-1'}]}, format='json')
+        repeated = self.api.put(endpoint, {
+            'remunerations': [{'month': 1, 'amount': '100'}, {'month': 1, 'amount': '200'}],
+        }, format='json')
+
+        self.assertEqual(negative.status_code, 400)
+        self.assertEqual(negative.data['detail'], 'Importe de remuneracion fuera de rango')
+        self.assertEqual(repeated.status_code, 400)
+        self.assertEqual(repeated.data['detail'], 'Mes invalido o repetido')
 
     def test_summary_keeps_unmatched_diagnostics_for_api_compatibility(self):
         batch = BankUploadBatch.objects.create(
@@ -488,6 +568,26 @@ class SalaryFlowTests(TestCase):
         self.assertEqual(future_date.data['detail'], 'La fecha de baja no puede ser futura')
         self.employee.refresh_from_db()
         self.assertTrue(self.employee.active)
+
+    def test_employee_hire_date_is_validated_against_future_and_termination(self):
+        future_hire = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'hire_date': '2100-01-01',
+        }, format='json')
+        valid_hire = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'hire_date': '2026-01-01',
+        }, format='json')
+        invalid_termination = self.api.patch(f'/api/salaries/employees/{self.employee.id}/', {
+            'active': False,
+            'termination_reason': 'resignation',
+            'termination_date': '2025-12-31',
+        }, format='json')
+
+        self.assertEqual(future_hire.status_code, 400)
+        self.assertEqual(future_hire.data['detail'], 'La fecha de ingreso no puede ser futura')
+        self.assertEqual(valid_hire.status_code, 200)
+        self.assertEqual(valid_hire.data['hire_date'], '2026-01-01')
+        self.assertEqual(invalid_termination.status_code, 400)
+        self.assertEqual(invalid_termination.data['detail'], 'La fecha de baja no puede ser anterior al ingreso')
 
     def test_employee_account_client_cannot_be_linked_twice(self):
         other_employee = create_employee('Otro Empleado', aliases=['OTRO'])
