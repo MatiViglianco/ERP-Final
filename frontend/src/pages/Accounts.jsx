@@ -32,6 +32,7 @@ import {
 import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
+import EditCalendarIcon from '@mui/icons-material/EditCalendar'
 import FilterAltIcon from '@mui/icons-material/FilterAlt'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import SearchIcon from '@mui/icons-material/Search'
@@ -47,7 +48,7 @@ const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 const API_ACCOUNT_DETAIL = (id) => `${API_BASE}/accounts/clients/${id}/`
 const API_ACCOUNT_PAY = (id) => `${API_BASE}/accounts/clients/${id}/pay/`
 const API_ACCOUNT_TX_CREATE = (id) => `${API_BASE}/accounts/clients/${id}/transactions/`
-const API_ACCOUNT_TX_DELETE = (txId) => `${API_BASE}/accounts/transactions/${txId}/`
+const API_ACCOUNT_TX_DETAIL = (txId) => `${API_BASE}/accounts/transactions/${txId}/`
 const API_ACCOUNT_STATS = `${API_BASE}/accounts/clients/stats/`
 
 const statusFilters = [
@@ -99,7 +100,39 @@ const SPANISH_MONTHS = [
   { value: '11', label: 'Noviembre' },
   { value: '12', label: 'Diciembre' },
 ]
-const todayISODate = () => new Date().toISOString().split('T')[0]
+// Ojo: toISOString() devuelve UTC, asi que despues de las 21hs de Argentina
+// daba el dia siguiente y los movimientos quedaban fechados un dia adelante.
+// Hay que armar la fecha con los componentes locales.
+const todayISODate = () => {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${month}-${day}`
+}
+
+const formatLongDate = (dateStr) => {
+  const parsed = toLocalDate(dateStr)
+  if (!parsed) return ''
+  return parsed.toLocaleDateString('es-AR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+}
+
+const formatLoadedAt = (value) => {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return parsed.toLocaleString('es-AR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
 
 const toLocalDate = (dateStr) => {
   if (!dateStr) return null
@@ -220,6 +253,10 @@ export default function AccountsPage() {
   const [newExpenseForm, setNewExpenseForm] = useState(() => ({ date: todayISODate(), amount: '', description: '' }))
   const [newExpenseError, setNewExpenseError] = useState('')
   const [newExpenseLoading, setNewExpenseLoading] = useState(false)
+  const [editDateOpen, setEditDateOpen] = useState(false)
+  const [editDateForm, setEditDateForm] = useState({ id: null, date: '', original: 0 })
+  const [editDateError, setEditDateError] = useState('')
+  const [editDateLoading, setEditDateLoading] = useState(false)
   const [whatsappLoadingId, setWhatsappLoadingId] = useState(null)
 
   useEffect(() => {
@@ -712,11 +749,11 @@ const handleWhatsappMessage = async (client) => {
 
   const openNewExpenseDialog = () => {
     if (!selectedClient) return
-    setNewExpenseForm((prev) => ({
-      date: prev.date || todayISODate(),
+    setNewExpenseForm({
+      date: todayISODate(),
       amount: '',
-      description: prev.description || '',
-    }))
+      description: '',
+    })
     setNewExpenseError('')
     setNewExpenseOpen(true)
   }
@@ -760,11 +797,13 @@ const handleWhatsappMessage = async (client) => {
         throw new Error(typeof detail === 'string' ? detail : 'No se pudo registrar el gasto')
       }
       setNewExpenseOpen(false)
-      setNewExpenseForm((prev) => ({
-        ...prev,
+      // La fecha vuelve a hoy en vez de arrastrarse: si no, el segundo
+      // movimiento hereda en silencio la fecha que se eligio para el primero.
+      setNewExpenseForm({
+        date: todayISODate(),
         amount: '',
         description: '',
-      }))
+      })
       if (data.client || data.transaction || data.totals) {
         applyDetailPatch({
           client: data.client,
@@ -788,7 +827,7 @@ const handleWhatsappMessage = async (client) => {
     setActionError('')
     setActionLoading(true)
     try {
-      const resp = await authFetch(API_ACCOUNT_TX_DELETE(txId), { method: 'DELETE' })
+      const resp = await authFetch(API_ACCOUNT_TX_DETAIL(txId), { method: 'DELETE' })
       const responseData = await resp.json().catch(() => ({}))
       if (resp.status !== 204 && !resp.ok) {
         throw new Error(responseData.detail || 'No se pudo eliminar la transacción')
@@ -812,6 +851,56 @@ const handleWhatsappMessage = async (client) => {
       setActionError(err.message)
     } finally {
       setActionLoading(false)
+    }
+  }
+
+  const openEditDateDialog = (tx) => {
+    if (!tx) return
+    setEditDateForm({ id: tx.id, date: tx.date || todayISODate(), original: tx.original })
+    setEditDateError('')
+    setEditDateOpen(true)
+  }
+
+  const closeEditDateDialog = () => {
+    if (editDateLoading) return
+    setEditDateOpen(false)
+    setEditDateError('')
+  }
+
+  const handleUpdateTransactionDate = async () => {
+    if (!editDateForm.id) return
+    if (!editDateForm.date) {
+      setEditDateError('Debes indicar la fecha del movimiento.')
+      return
+    }
+    setEditDateLoading(true)
+    setEditDateError('')
+    try {
+      const resp = await authFetch(API_ACCOUNT_TX_DETAIL(editDateForm.id), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: editDateForm.date }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) {
+        throw new Error(data.detail || 'No se pudo actualizar la fecha')
+      }
+      setEditDateOpen(false)
+      if (data.client || data.transaction || data.totals) {
+        applyDetailPatch({
+          client: data.client,
+          totals: data.totals,
+          transactions: data.transaction ? [data.transaction] : [],
+        })
+      } else {
+        fetchClients()
+        fetchDetail()
+      }
+      fetchStats()
+    } catch (err) {
+      setEditDateError(err.message)
+    } finally {
+      setEditDateLoading(false)
     }
   }
 
@@ -1166,9 +1255,16 @@ const handleWhatsappMessage = async (client) => {
                                 }}
                               >
                                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
-                                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                                    {tx.date ? toLocalDate(tx.date)?.toLocaleDateString('es-AR') : '-'}
-                                  </Typography>
+                                  <Stack spacing={0}>
+                                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                                      {tx.date ? toLocalDate(tx.date)?.toLocaleDateString('es-AR') : '-'}
+                                    </Typography>
+                                    {tx.created_at && (
+                                      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.4)' }}>
+                                        Cargado el {formatLoadedAt(tx.created_at)}
+                                      </Typography>
+                                    )}
+                                  </Stack>
                                   <Checkbox
                                     size="small"
                                     checked={selectedTransactions.has(tx.id)}
@@ -1188,6 +1284,15 @@ const handleWhatsappMessage = async (client) => {
                                     disabled={actionLoading}
                                   >
                                     <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() => openEditDateDialog(tx)}
+                                    disabled={actionLoading}
+                                    title="Corregir la fecha del movimiento"
+                                  >
+                                    <EditCalendarIcon fontSize="small" />
                                   </IconButton>
                                   <Typography variant="body2" color="text.secondary">
                                     {tx.description && tx.description.trim() ? tx.description : 'Gasto de'}
@@ -1266,16 +1371,34 @@ const handleWhatsappMessage = async (client) => {
                             {group.transactions.map((tx) => (
                               <TableRow key={tx.id}>
                                 <TableCell padding="checkbox">
-                                  <IconButton
-                                    size="small"
-                                    color="error"
-                                    onClick={() => handleDeleteTransaction(tx.id)}
-                                    disabled={actionLoading}
-                                  >
-                                    <DeleteIcon fontSize="small" />
-                                  </IconButton>
+                                  <Stack direction="row" spacing={0}>
+                                    <IconButton
+                                      size="small"
+                                      color="error"
+                                      onClick={() => handleDeleteTransaction(tx.id)}
+                                      disabled={actionLoading}
+                                    >
+                                      <DeleteIcon fontSize="small" />
+                                    </IconButton>
+                                    <IconButton
+                                      size="small"
+                                      color="primary"
+                                      onClick={() => openEditDateDialog(tx)}
+                                      disabled={actionLoading}
+                                      title="Corregir la fecha del movimiento"
+                                    >
+                                      <EditCalendarIcon fontSize="small" />
+                                    </IconButton>
+                                  </Stack>
                                 </TableCell>
-                                <TableCell>{tx.date ? toLocalDate(tx.date)?.toLocaleDateString('es-AR') : '-'}</TableCell>
+                                <TableCell>
+                                  {tx.date ? toLocalDate(tx.date)?.toLocaleDateString('es-AR') : '-'}
+                                  {tx.created_at && (
+                                    <Typography variant="caption" display="block" sx={{ color: 'rgba(255,255,255,0.4)' }}>
+                                      Cargado el {formatLoadedAt(tx.created_at)}
+                                    </Typography>
+                                  )}
+                                </TableCell>
                                 <TableCell>
                                   {tx.description && tx.description.trim()
                                     ? tx.description
@@ -1775,11 +1898,16 @@ const handleWhatsappMessage = async (client) => {
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
           {newExpenseError && <Alert severity="error">{newExpenseError}</Alert>}
           <TextField
-            label="Fecha"
+            label="Fecha del movimiento"
             type="date"
             value={newExpenseForm.date}
             onChange={(e) => setNewExpenseForm((prev) => ({ ...prev, date: e.target.value }))}
             InputLabelProps={{ shrink: true }}
+            helperText={
+              newExpenseForm.date
+                ? `Se va a registrar en ${formatLongDate(newExpenseForm.date)}`
+                : 'Es la fecha del vale, no la de hoy.'
+            }
             fullWidth
           />
           <TextField
@@ -1812,7 +1940,52 @@ const handleWhatsappMessage = async (client) => {
             Cancelar
           </Button>
           <Button variant="contained" color="success" onClick={handleCreateExpense} disabled={newExpenseLoading}>
-            Guardar gasto
+            {newExpenseForm.date
+              ? `Guardar en ${formatLongDate(newExpenseForm.date)}`
+              : 'Guardar gasto'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={editDateOpen}
+        onClose={closeEditDateDialog}
+        PaperProps={{
+          sx: {
+            backgroundColor: 'rgba(18,18,24,0.98)',
+            borderRadius: 3,
+            minWidth: { xs: '90vw', sm: 420 },
+            color: '#fff',
+            boxShadow: '0 25px 80px rgba(0,0,0,0.6)',
+            border: '1px solid rgba(255,255,255,0.05)',
+          },
+        }}
+      >
+        <DialogTitle sx={{ fontWeight: 700, fontSize: '1.25rem' }}>
+          Corregir fecha del movimiento
+        </DialogTitle>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
+          {editDateError && <Alert severity="error">{editDateError}</Alert>}
+          <Typography variant="body2" color="text.secondary">
+            Movimiento de {formatCurrency(editDateForm.original)}. Cambiar la fecha lo mueve
+            de mes en los totales y recalcula si figura como vencido. El monto no se toca.
+          </Typography>
+          <TextField
+            label="Fecha del vale"
+            type="date"
+            value={editDateForm.date}
+            onChange={(e) => setEditDateForm((prev) => ({ ...prev, date: e.target.value }))}
+            InputLabelProps={{ shrink: true }}
+            helperText={editDateForm.date ? `Va a quedar en ${formatLongDate(editDateForm.date)}` : ''}
+            fullWidth
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 3 }}>
+          <Button onClick={closeEditDateDialog} sx={{ color: '#b0b0b0' }} disabled={editDateLoading}>
+            Cancelar
+          </Button>
+          <Button variant="contained" onClick={handleUpdateTransactionDate} disabled={editDateLoading}>
+            Guardar fecha
           </Button>
         </DialogActions>
       </Dialog>

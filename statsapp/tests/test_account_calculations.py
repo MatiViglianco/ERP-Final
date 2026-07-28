@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -14,7 +14,7 @@ from statsapp.views import (
     account_client_pay,
     account_client_view,
     account_clients_stats,
-    account_transaction_delete,
+    account_transaction_detail,
 )
 
 
@@ -175,10 +175,82 @@ class AccountCalculationTests(TestCase):
         request = APIRequestFactory().delete('/api/accounts/transactions/delete-me/')
         force_authenticate(request, user=self.user)
 
-        response = account_transaction_delete(request, external_id='delete-me')
+        response = account_transaction_detail(request, external_id='delete-me')
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['deleted_transaction_id'], 'delete-me')
         self.assertEqual(response.data['client']['total_debt'], 25.0)
         self.assertEqual(response.data['totals']['original'], 25.0)
         self.assertEqual(response.data['totals']['remaining'], 25.0)
+
+    def test_patch_transaction_date_updates_date_and_status(self):
+        client = AccountClient.objects.create(external_id='client-6', first_name='Test', last_name='Client')
+        today = date.today()
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='fix-my-date',
+            date=today,
+            original_amount=Decimal('100'),
+            paid_amount=Decimal('0'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        _recalc_account_totals([client.id])
+        # Un dia del mes anterior: al reubicarlo tiene que pasar a vencido.
+        previous_month = date(today.year, today.month, 1) - timedelta(days=1)
+
+        request = APIRequestFactory().patch(
+            '/api/accounts/transactions/fix-my-date/',
+            {'date': previous_month.isoformat()},
+            format='json',
+        )
+        force_authenticate(request, user=self.user)
+
+        response = account_transaction_detail(request, external_id='fix-my-date')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['transaction']['date'], previous_month.isoformat())
+        self.assertEqual(response.data['transaction']['status'], AccountTransaction.Status.OVERDUE)
+        # El monto no se toca, solo la ubicacion temporal del movimiento.
+        self.assertEqual(response.data['totals']['remaining'], 100.0)
+
+    def test_patch_transaction_rejects_invalid_date(self):
+        client = AccountClient.objects.create(external_id='client-7', first_name='Test', last_name='Client')
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='bad-date',
+            date=date.today(),
+            original_amount=Decimal('10'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        request = APIRequestFactory().patch(
+            '/api/accounts/transactions/bad-date/',
+            {'date': 'no-es-una-fecha'},
+            format='json',
+        )
+        force_authenticate(request, user=self.user)
+
+        response = account_transaction_detail(request, external_id='bad-date')
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_transaction_serializer_exposes_created_at(self):
+        client = AccountClient.objects.create(external_id='client-8', first_name='Test', last_name='Client')
+        loaded_at = timezone.now()
+        AccountTransaction.objects.create(
+            client=client,
+            external_id='with-created-at',
+            date=date(2026, 6, 29),
+            created_at=loaded_at,
+            original_amount=Decimal('10'),
+            status=AccountTransaction.Status.ACTIVE,
+        )
+        request = APIRequestFactory().get(f'/api/accounts/clients/{client.id}/')
+        force_authenticate(request, user=self.user)
+
+        response = account_client_view(request, pk=client.id)
+
+        self.assertEqual(response.status_code, 200)
+        tx = response.data['transactions'][0]
+        # date = fecha del vale, created_at = cuando se cargo. No son lo mismo.
+        self.assertEqual(tx['date'], '2026-06-29')
+        self.assertEqual(tx['created_at'], loaded_at.isoformat())

@@ -21,7 +21,7 @@ from .views import (
     account_client_pay,
     account_transaction_create,
     account_clients_stats,
-    account_transaction_delete,
+    account_transaction_detail,
 )
 from .auth_views import (
     CookieTokenObtainPairView,
@@ -86,7 +86,7 @@ urlpatterns = [
     path('accounts/clients/<uuid:pk>/', account_client_view, name='accounts_client_detail'),
     path('accounts/clients/<uuid:pk>/pay/', account_client_pay, name='accounts_client_pay'),
     path('accounts/clients/<uuid:pk>/transactions/', account_transaction_create, name='accounts_transaction_create'),
-    path('accounts/transactions/<str:external_id>/', account_transaction_delete, name='accounts_transaction_delete'),
+    path('accounts/transactions/<str:external_id>/', account_transaction_detail, name='accounts_transaction_detail'),
     path('auth/login/', CookieTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/logout/', LogoutView.as_view(), name='api_logout'),

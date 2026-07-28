@@ -1621,6 +1621,10 @@ def _serialize_transactions(qs):
             'id': tx.external_id,
             'branch': _serialize_branch(tx.branch),
             'date': tx.date.isoformat() if tx.date else None,
+            # created_at es cuando entro el movimiento al sistema; date es la
+            # fecha del vale. Se exponen los dos para poder distinguir un vale
+            # viejo cargado tarde de uno mal fechado.
+            'created_at': tx.created_at.isoformat() if tx.created_at else None,
             'description': tx.description or '',
             'original': float(tx.original_amount or 0),
             'paid': float(tx.paid_amount or 0),
@@ -2001,11 +2005,51 @@ def account_transaction_create(request, pk):
     }, status=status.HTTP_201_CREATED)
 
 
-@api_view(['DELETE'])
+@api_view(['PATCH', 'DELETE'])
 @permission_classes([IsAdminUser])
-def account_transaction_delete(request, external_id):
+def account_transaction_detail(request, external_id):
     tx = get_object_or_404(AccountTransaction, external_id=external_id)
     client_id = tx.client_id
+
+    if request.method == 'PATCH':
+        data = request.data or {}
+        updated_fields = []
+
+        if 'date' in data:
+            new_date = _parse_client_date(data.get('date'))
+            if not new_date:
+                return Response({'detail': 'Fecha invalida'}, status=status.HTTP_400_BAD_REQUEST)
+            tx.date = new_date
+            updated_fields.append('date')
+            # El estado depende del mes de la fecha, asi que se recalcula salvo
+            # que el movimiento ya tenga pagos aplicados (ahi manda el pago).
+            if tx.status in (AccountTransaction.Status.ACTIVE, AccountTransaction.Status.OVERDUE):
+                today = date.today()
+                start_of_month = date(today.year, today.month, 1)
+                tx.status = (
+                    AccountTransaction.Status.OVERDUE
+                    if new_date < start_of_month
+                    else AccountTransaction.Status.ACTIVE
+                )
+                updated_fields.append('status')
+
+        if 'description' in data:
+            tx.description = (data.get('description') or '').strip()
+            updated_fields.append('description')
+
+        if not updated_fields:
+            return Response({'detail': 'No hay cambios para aplicar'}, status=status.HTTP_400_BAD_REQUEST)
+
+        tx.save(update_fields=updated_fields + ['updated_at'])
+        _recalc_account_totals([client_id])
+        client = AccountClient.objects.filter(pk=client_id).first()
+        return Response({
+            'detail': 'Movimiento actualizado correctamente',
+            'transaction': _serialize_transactions([tx])[0],
+            'client': _serialize_account_client(client) if client else None,
+            'totals': _account_transaction_totals(client) if client else {'original': 0, 'paid': 0, 'remaining': 0},
+        })
+
     tx.delete()
     _recalc_account_totals([client_id])
     client = AccountClient.objects.filter(pk=client_id).first()
