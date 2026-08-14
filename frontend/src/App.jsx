@@ -184,7 +184,7 @@ function Footer() {
           </Stack>
           <Stack spacing={0.5}>
             <Typography variant="subtitle2" color="text.secondary">Contacto interno</Typography>
-            <Typography variant="body2">matiasviglisnco@gmail.com</Typography>
+            <Typography variant="body2">matiasviglianco@gmail.com</Typography>
             <Typography variant="body2">+54 3584 438810</Typography>
           </Stack>
         </Stack>
