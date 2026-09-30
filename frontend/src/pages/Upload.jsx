@@ -19,10 +19,11 @@ export default function UploadPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  const [bankFile, setBankFile] = useState(null)
+  const [bankFiles, setBankFiles] = useState([])
   const [bankType, setBankType] = useState('santander')
   const [bankLoading, setBankLoading] = useState(false)
   const [bankError, setBankError] = useState('')
+  const [bankResult, setBankResult] = useState(null)
 
   const [getnetFile, setGetnetFile] = useState(null)
   const [getnetBranchId, setGetnetBranchId] = useState('')
@@ -121,12 +122,13 @@ export default function UploadPage() {
 
   const submitBankUpload = async ({ overwrite = false } = {}) => {
     setBankError('')
-    if (!bankFile) {
+    setBankResult(null)
+    if (!bankFiles.length) {
       setBankError('Selecciona el archivo bancario')
       return
     }
     const form = new FormData()
-    form.append('file', bankFile)
+    bankFiles.forEach((bankFile) => form.append('file', bankFile))
     form.append('bank', bankType)
     if (overwrite) form.append('overwrite', '1')
 
@@ -147,7 +149,7 @@ export default function UploadPage() {
         }
         throw new Error(data?.detail || 'Error al cargar los movimientos')
       }
-      navigate(`/bancos?bank=${bankType}`)
+      setBankResult({ ...(data.summary || {}), detail: data.detail })
     } catch (err) {
       setBankError(err.message)
     } finally {
@@ -302,12 +304,36 @@ export default function UploadPage() {
                   <MenuItem value="bancon">Bancon (CSV/XLS)</MenuItem>
                 </Select>
               </FormControl>
-              <input type="file" accept=".csv,.xls,.xlsx" onChange={(e) => setBankFile(e.target.files?.[0] || null)} />
+              <Typography variant="body2" color="text.secondary">
+                Podes seleccionar varios archivos del mismo banco (por ejemplo, el mes partido en quincenas). Los movimientos repetidos entre archivos o ya cargados se omiten.
+              </Typography>
+              <input
+                data-testid="bank-file-input"
+                type="file"
+                multiple
+                accept=".csv,.xls,.xlsx"
+                onChange={(e) => { setBankFiles(Array.from(e.target.files || [])); setBankResult(null) }}
+              />
+              {bankFiles.length > 1 && (
+                <Typography variant="body2">{bankFiles.length} archivos: {bankFiles.map((bankFile) => bankFile.name).join(', ')}</Typography>
+              )}
               <Box>
                 <Button type="submit" variant="outlined" disabled={bankLoading}>Subir movimientos</Button>
               </Box>
               {bankLoading && <LinearProgress />}
               {bankError && <Alert severity="error">{bankError}</Alert>}
+              {bankResult && (
+                <Alert
+                  severity={bankResult.movimientos ? 'success' : 'info'}
+                  action={<Button color="inherit" size="small" onClick={() => navigate(`/bancos?bank=${bankType}`)}>Ver movimientos</Button>}
+                >
+                  {bankResult.movimientos
+                    ? `Se cargaron ${bankResult.movimientos} movimientos nuevos (${bankResult.desde} a ${bankResult.hasta}).`
+                    : (bankResult.detail || 'No se encontraron movimientos nuevos.')}
+                  {bankResult.solapados_entre_archivos ? ` ${bankResult.solapados_entre_archivos} repetidos entre archivos.` : ''}
+                  {bankResult.duplicados ? ` ${bankResult.duplicados} ya estaban cargados.` : ''}
+                </Alert>
+              )}
             </Box>
           </CardContent>
         </Card>
