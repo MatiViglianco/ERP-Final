@@ -6,7 +6,8 @@ import re
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from collections import Counter
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from io import BytesIO
@@ -1527,6 +1528,136 @@ def delete_vale_batch(*, batch):
         'items_deleted': deleted_items,
         'transactions_deleted': deleted_transactions,
     }
+
+
+DUPLICATE_MIN_FUZZY_ROWS = 4
+DUPLICATE_AMOUNT_OVERLAP = Decimal('0.8')
+DUPLICATE_FILENAME_LOOKBACK_DAYS = 60
+_GENERIC_UPLOAD_NAME = re.compile(r'^(image|imagen|foto|photo|img|captura|screenshot)(-fix)?\.[a-z0-9]+$', re.IGNORECASE)
+
+
+def _vale_payload_rows(vales_payload):
+    rows = []
+    for entry in vales_payload or []:
+        if not isinstance(entry, dict):
+            continue
+        amount = parse_decimal(entry.get('importe'))
+        if amount <= Decimal('0'):
+            continue
+        client_id = str(entry.get('cliente_id') or '').strip()
+        client_key = client_id or f"raw:{normalize_search_text(entry.get('cliente_raw') or '')}"
+        rows.append((amount.quantize(Decimal('0.01')), client_key))
+    return rows
+
+
+def _meaningful_filenames(source_filenames):
+    return {
+        str(name).strip().lower()
+        for name in source_filenames or []
+        if str(name or '').strip() and not _GENERIC_UPLOAD_NAME.match(str(name).strip())
+    }
+
+
+def find_duplicate_vale_batch(*, batch_date, vales_payload, source_filenames=None):
+    """Busca un lote ya cargado que parezca la misma hoja de vales.
+
+    Candidatos: lotes de la misma fecha, o lotes recientes que compartan un nombre de
+    foto (por si la misma hoja se cargo con otra fecha). Es duplicado si los vales son
+    identicos (importe + cliente) o, en hojas de 4+ vales, si al menos el 80% de los
+    importes coincide: una relectura del OCR puede cambiar algun nombre o importe.
+    """
+    batch_date = normalize_vale_date_year(batch_date)
+    new_rows = _vale_payload_rows(vales_payload)
+    if not batch_date or not new_rows:
+        return None
+
+    candidates = {batch.pk: batch for batch in ValeImportBatch.objects.filter(date=batch_date)}
+    filenames = _meaningful_filenames(source_filenames)
+    if filenames:
+        since = timezone.now() - timedelta(days=DUPLICATE_FILENAME_LOOKBACK_DAYS)
+        for batch in ValeImportBatch.objects.filter(created_at__gte=since).exclude(pk__in=candidates.keys()):
+            if filenames & _meaningful_filenames(batch.source_filenames):
+                candidates[batch.pk] = batch
+    if not candidates:
+        return None
+
+    new_full = Counter(new_rows)
+    new_amounts = Counter(amount for amount, _ in new_rows)
+    best = None
+    items = ValeImportItem.objects.filter(batch_id__in=candidates.keys()).values_list(
+        'batch_id', 'amount', 'client_id', 'client_raw',
+    )
+    existing_rows = {}
+    for batch_id, amount, client_id, client_raw in items:
+        client_key = str(client_id) if client_id else f'raw:{normalize_search_text(client_raw)}'
+        existing_rows.setdefault(batch_id, []).append((Decimal(amount).quantize(Decimal('0.01')), client_key))
+
+    for batch_id, rows in existing_rows.items():
+        old_full = Counter(rows)
+        old_amounts = Counter(amount for amount, _ in rows)
+        size = max(len(new_rows), len(rows))
+        amount_matches = sum((new_amounts & old_amounts).values())
+        identical = new_full == old_full
+        similar = (
+            size >= DUPLICATE_MIN_FUZZY_ROWS
+            and Decimal(amount_matches) / Decimal(size) >= DUPLICATE_AMOUNT_OVERLAP
+        )
+        if not (identical or similar):
+            continue
+        if best is None or amount_matches > best[1]:
+            best = (candidates[batch_id], amount_matches, identical)
+
+    if not best:
+        return None
+    batch, amount_matches, identical = best
+    return {
+        'lote_id': batch.lote_id,
+        'fecha': batch.date.isoformat(),
+        'cargado_en': batch.created_at.isoformat() if batch.created_at else None,
+        'total': float(batch.total or 0),
+        'vales_count': len(existing_rows.get(batch.pk, [])),
+        'coincidencias': amount_matches,
+        'identico': identical,
+        'source_filenames': batch.source_filenames or [],
+    }
+
+
+def alias_conflict_warnings(vales_payload):
+    """Avisa cuando un vale se asigno a un cliente distinto del que tiene ese alias."""
+    wanted = {}
+    for entry in vales_payload or []:
+        if not isinstance(entry, dict):
+            continue
+        client_id = str(entry.get('cliente_id') or '').strip()
+        raw = str(entry.get('cliente_raw') or '').strip()
+        normalized = normalize_search_text(raw)
+        if client_id and normalized:
+            wanted.setdefault(normalized, []).append((raw, client_id))
+    if not wanted:
+        return []
+
+    aliases = {
+        alias.normalized_alias: alias
+        for alias in AccountClientAlias.objects.select_related('client').filter(normalized_alias__in=wanted.keys())
+    }
+    chosen_ids = {client_id for rows in wanted.values() for _, client_id in rows}
+    chosen = {str(client.pk): client for client in AccountClient.objects.filter(pk__in=chosen_ids)}
+
+    warnings = []
+    for normalized, rows in wanted.items():
+        alias = aliases.get(normalized)
+        if not alias:
+            continue
+        for raw, client_id in rows:
+            if client_id == str(alias.client_id):
+                continue
+            chosen_client = chosen.get(client_id)
+            chosen_name = full_client_name(chosen_client) if chosen_client else 'otro cliente'
+            warnings.append(
+                f'"{raw}" figura como alias de {full_client_name(alias.client)}, '
+                f'pero se cargo a {chosen_name}. Verifica que sea correcto.'
+            )
+    return warnings
 
 
 def create_vale_batch(*, user, batch_date, vales_payload, source_filenames=None):

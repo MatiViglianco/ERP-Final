@@ -13,12 +13,14 @@ from rest_framework.response import Response
 
 from .models import AccountClient, AccountClientAlias, ValeImportBatch, ValeImportItem
 from .vales_services import (
+    alias_conflict_warnings,
     alias_payload,
     client_payload,
     create_account_client,
     create_vale_batch,
     delete_vale_batch,
     ensure_alias,
+    find_duplicate_vale_batch,
     match_client_for_ocr,
     parse_client_date,
     process_ocr_uploads,
@@ -198,13 +200,34 @@ def vales_cargar(request):
         return Response({'detail': 'La fecha es obligatoria'}, status=status.HTTP_400_BAD_REQUEST)
     if not isinstance(vales, list) or not vales:
         return Response({'detail': 'Debes enviar una lista de vales'}, status=status.HTTP_400_BAD_REQUEST)
+    source_filenames = source_filenames if isinstance(source_filenames, list) else []
 
+    force_duplicate = request.data.get('forzar_duplicado', False)
+    if isinstance(force_duplicate, str):
+        force_duplicate = force_duplicate.strip().lower() in {'1', 'true', 'si', 'yes'}
+    if not force_duplicate:
+        duplicate = find_duplicate_vale_batch(
+            batch_date=batch_date,
+            vales_payload=vales,
+            source_filenames=source_filenames,
+        )
+        if duplicate:
+            return Response({
+                'detail': (
+                    f"Estos vales parecen ya cargados en el lote {duplicate['lote_id']} "
+                    f"({duplicate['coincidencias']} de {duplicate['vales_count']} importes coinciden)."
+                ),
+                'duplicado': duplicate,
+            }, status=status.HTTP_409_CONFLICT)
+
+    alias_warnings = alias_conflict_warnings(vales)
     batch, warnings = create_vale_batch(
         user=request.user,
         batch_date=batch_date,
         vales_payload=vales,
-        source_filenames=source_filenames if isinstance(source_filenames, list) else [],
+        source_filenames=source_filenames,
     )
+    warnings = alias_warnings + warnings
     account_items = batch.items.filter(transaction__isnull=False)
     account_total = sum((item.amount for item in account_items), start=Decimal('0'))
     pending_count = batch.items.filter(pending_review=True).count()
