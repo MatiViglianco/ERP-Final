@@ -2,7 +2,7 @@ import json
 from decimal import Decimal
 from datetime import date, datetime
 from uuid import uuid4
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from django.db import transaction as db_transaction
 from django.db.models import Sum, Count, Q, Min, Max, F, DecimalField, ExpressionWrapper, Case, When, Value
 from django.db.models.functions import Coalesce, ExtractYear, ExtractMonth, TruncDate
@@ -610,20 +610,9 @@ def upload_bank_file(request):
     if bank not in {'santander', 'bancon'}:
         return Response({'detail': 'Banco invalido. Use "santander" o "bancon"'}, status=status.HTTP_400_BAD_REQUEST)
 
-    uploaded = request.FILES.get('file')
-    if not uploaded:
+    uploaded_files = request.FILES.getlist('file')
+    if not uploaded_files:
         return Response({'detail': 'Falta el archivo a subir'}, status=status.HTTP_400_BAD_REQUEST)
-
-    parser = parse_santander_csv if bank == 'santander' else parse_bancon_file
-    try:
-        rows = parser(uploaded)
-    except Exception as exc:
-        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-    dates = sorted([row['date'] for row in rows if row.get('date')])
-    if not dates:
-        return Response({'detail': 'No se detectaron fechas validas en el archivo'}, status=status.HTTP_400_BAD_REQUEST)
-    fecha_desde, fecha_hasta = dates[0], dates[-1]
 
     def _normalize_text(value):
         return ' '.join((value or '').strip().lower().split())
@@ -635,6 +624,35 @@ def upload_bank_file(request):
             _normalize_text(description_value),
             round(float(amount_value or 0.0), 2),
         )
+
+    # Several files may cover overlapping periods (e.g. Santander only exports ~15 days
+    # at a time). Merge them as a multiset union: a movement present in two files counts
+    # once, while identical movements repeated inside one file are all kept.
+    parser = parse_santander_csv if bank == 'santander' else parse_bancon_file
+    rows = []
+    merged_counts = Counter()
+    overlap_count = 0
+    for uploaded in uploaded_files:
+        try:
+            file_rows = parser(uploaded)
+        except Exception as exc:
+            name = getattr(uploaded, 'name', '') or 'archivo'
+            detail = f'{name}: {exc}' if len(uploaded_files) > 1 else str(exc)
+            return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
+        file_counts = Counter()
+        for row in file_rows:
+            key = _tx_key(row.get('date'), row.get('concept'), row.get('description'), row.get('amount'))
+            file_counts[key] += 1
+            if file_counts[key] > merged_counts[key]:
+                merged_counts[key] += 1
+                rows.append(row)
+            else:
+                overlap_count += 1
+
+    dates = sorted([row['date'] for row in rows if row.get('date')])
+    if not dates:
+        return Response({'detail': 'No se detectaron fechas validas en el archivo'}, status=status.HTTP_400_BAD_REQUEST)
+    fecha_desde, fecha_hasta = dates[0], dates[-1]
 
     existing_by_key = defaultdict(list)
     existing_qs = BankTransaction.objects.filter(
@@ -678,6 +696,8 @@ def upload_bank_file(request):
                 'movimientos_total': len(rows),
                 'duplicados': duplicate_count,
                 'detalles_actualizados': len(enriched_duplicates),
+                'archivos': len(uploaded_files),
+                'solapados_entre_archivos': overlap_count,
             },
             'detail': 'No se encontraron movimientos nuevos. Se conservaron los existentes.',
         })
@@ -688,7 +708,7 @@ def upload_bank_file(request):
 
     batch = BankUploadBatch.objects.create(
         bank=bank,
-        original_filename=getattr(uploaded, 'name', ''),
+        original_filename=', '.join(getattr(f, 'name', '') or '' for f in uploaded_files)[:255],
         fecha_desde=fecha_desde_new,
         fecha_hasta=fecha_hasta_new,
     )
@@ -720,6 +740,8 @@ def upload_bank_file(request):
             'movimientos_total': len(rows),
             'duplicados': duplicate_count,
             'detalles_actualizados': len(enriched_duplicates),
+            'archivos': len(uploaded_files),
+            'solapados_entre_archivos': overlap_count,
         }
     })
 
