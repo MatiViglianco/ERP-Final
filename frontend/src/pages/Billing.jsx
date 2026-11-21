@@ -55,6 +55,29 @@ const VAT_RATES = [
 
 const VOUCHER_LETTERS = { 1: 'A', 3: 'NC A', 6: 'B', 8: 'NC B', 11: 'C', 13: 'NC C' }
 const API_INVOICE_CREDIT_NOTE = (id) => `${API_BASE}/billing/invoices/${id}/credit-note/`
+const API_INVOICE_AUTHORIZE = (id) => `${API_BASE}/billing/invoices/${id}/authorize/`
+const API_MANUAL_INVOICES = `${API_BASE}/billing/manual-invoices/`
+
+const EMPTY_MANUAL_ROW = { amount: '', description: '' }
+
+// Acepta "1500", "1500.50", "1.500,50" o "1500,50".
+function parseAmount(value) {
+  let text = String(value || '').trim().replace(/\s|\$/g, '')
+  if (text.includes(',') && text.includes('.') && text.lastIndexOf(',') > text.lastIndexOf('.')) {
+    text = text.replace(/\./g, '')
+  }
+  const number = Number(text.replace(',', '.'))
+  return Number.isFinite(number) ? number : NaN
+}
+
+// Reparte un total en N importes; el ultimo absorbe el redondeo.
+function splitAmount(total, count) {
+  const cents = Math.round(total * 100)
+  const base = Math.floor(cents / count)
+  return Array.from({ length: count }, (_, index) => (
+    (index === count - 1 ? cents - base * (count - 1) : base) / 100
+  ))
+}
 
 function formatVoucher(invoice) {
   if (!invoice?.voucher_number) return '-'
@@ -167,6 +190,12 @@ export default function BillingPage() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelTarget, setCancelTarget] = useState(null)
   const [cancelReason, setCancelReason] = useState('')
+  const [manualRows, setManualRows] = useState([{ ...EMPTY_MANUAL_ROW }])
+  const [manualVatRate, setManualVatRate] = useState('10.5')
+  const [splitTotal, setSplitTotal] = useState('')
+  const [splitCount, setSplitCount] = useState('10')
+  const [manualConfirmOpen, setManualConfirmOpen] = useState(false)
+  const [manualResults, setManualResults] = useState(null)
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({ year, month })
@@ -184,6 +213,20 @@ export default function BillingPage() {
   const selectedPaymentsTotal = useMemo(() => getnetCandidates
     .filter((payment) => selectedPayments.has(payment.id))
     .reduce((acc, payment) => acc + Number(payment.amount || 0), 0), [getnetCandidates, selectedPayments])
+
+  const manualAmounts = useMemo(() => manualRows.map((row) => parseAmount(row.amount)), [manualRows])
+  const manualFilledRows = useMemo(
+    () => manualRows.filter((row) => String(row.amount || '').trim() !== ''),
+    [manualRows],
+  )
+  const manualInvalid = useMemo(
+    () => manualRows.some((row, index) => String(row.amount || '').trim() !== '' && !(manualAmounts[index] > 0)),
+    [manualRows, manualAmounts],
+  )
+  const manualTotal = useMemo(
+    () => manualAmounts.reduce((acc, value) => acc + (value > 0 ? value : 0), 0),
+    [manualAmounts],
+  )
 
   const totalCollected = useMemo(() => {
     const collections = summary?.collections || {}
@@ -358,6 +401,85 @@ export default function BillingPage() {
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudo emitir la nota de credito')
       setSuccess(`Factura ${formatVoucher(target)} anulada con ${formatVoucher(data)} (CAE ${data.cae})`)
+      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
+    } catch (err) {
+      setError(err.message)
+      await loadBilling()
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const updateManualRow = (index, field, value) => {
+    setManualRows((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, [field]: value } : row)))
+  }
+
+  const addManualRow = () => setManualRows((prev) => [...prev, { ...EMPTY_MANUAL_ROW }])
+
+  const removeManualRow = (index) => {
+    setManualRows((prev) => (prev.length === 1 ? [{ ...EMPTY_MANUAL_ROW }] : prev.filter((_, rowIndex) => rowIndex !== index)))
+  }
+
+  const applySplit = () => {
+    const total = parseAmount(splitTotal)
+    const count = Number.parseInt(splitCount, 10)
+    if (!(total > 0) || !(count > 0) || count > 100) {
+      setError('Para repartir, carga un total mayor a cero y entre 1 y 100 facturas')
+      return
+    }
+    setError('')
+    setManualRows(splitAmount(total, count).map((amount) => ({ amount: String(amount), description: '' })))
+  }
+
+  const issueManualInvoices = async () => {
+    setManualConfirmOpen(false)
+    const items = manualRows
+      .map((row, index) => ({ amount: manualAmounts[index], description: row.description }))
+      .filter((item) => item.amount > 0)
+    if (!items.length) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    setManualResults(null)
+    try {
+      const resp = await authFetch(API_MANUAL_INVOICES, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items,
+          vat_rate: manualVatRate,
+          branch_id: invoiceBranchId || null,
+        }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudieron emitir las facturas manuales')
+      setManualResults(data)
+      if (data.authorized) {
+        setSuccess(`${data.authorized} factura(s) manual(es) autorizada(s) por ${formatCurrency(data.authorized_total)}`)
+      }
+      if (data.failed) setError(`${data.failed} factura(s) manual(es) no se pudieron emitir. Revisa el detalle.`)
+      // Quedan solo las filas que fallaron, para reintentarlas.
+      const failedRows = (data.results || [])
+        .filter((item) => !item.ok)
+        .map((item) => ({ amount: String(item.amount), description: items[item.row - 1]?.description || '' }))
+      setManualRows(failedRows.length ? failedRows : [{ ...EMPTY_MANUAL_ROW }])
+      await Promise.all([loadBilling(), loadArcaStatus()])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const retryInvoice = async (invoice) => {
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const resp = await authFetch(API_INVOICE_AUTHORIZE(invoice.id), { method: 'POST' })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo autorizar la factura')
+      setSuccess(`Factura ${formatVoucher(data)} autorizada (CAE ${data.cae})`)
       await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
     } catch (err) {
       setError(err.message)
@@ -738,6 +860,147 @@ export default function BillingPage() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardContent>
+          <Stack spacing={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
+              <Box>
+                <Typography variant="h6" fontWeight={700}>Facturas manuales</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Para ventas que no pasaron por el posnet (efectivo, transferencia). Cada importe genera una Factura B a consumidor final con el IVA incluido.
+                </Typography>
+              </Box>
+              <Box sx={{ textAlign: { md: 'right' } }}>
+                <Typography variant="body2" color="text.secondary">Facturado en el mes</Typography>
+                <Typography variant="h6" fontWeight={700}>{formatCurrency(summary?.invoices?.authorized_total)}</Typography>
+              </Box>
+            </Stack>
+
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
+              <TextField
+                label="Total a repartir"
+                value={splitTotal}
+                onChange={(event) => setSplitTotal(event.target.value)}
+                placeholder="1.000.000"
+                size="small"
+              />
+              <TextField
+                label="Cantidad de facturas"
+                type="number"
+                value={splitCount}
+                onChange={(event) => setSplitCount(event.target.value)}
+                inputProps={{ min: 1, max: 100 }}
+                size="small"
+                sx={{ width: { md: 180 } }}
+              />
+              <Button variant="outlined" onClick={applySplit} disabled={actionLoading}>Repartir</Button>
+            </Stack>
+
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ width: 48 }}>#</TableCell>
+                  <TableCell sx={{ width: 220 }}>Importe</TableCell>
+                  <TableCell>Detalle (opcional)</TableCell>
+                  <TableCell sx={{ width: 90 }} />
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {manualRows.map((row, index) => {
+                  const invalid = String(row.amount || '').trim() !== '' && !(manualAmounts[index] > 0)
+                  return (
+                    <TableRow key={index}>
+                      <TableCell>{index + 1}</TableCell>
+                      <TableCell>
+                        <TextField
+                          size="small"
+                          fullWidth
+                          value={row.amount}
+                          error={invalid}
+                          helperText={invalid ? 'Importe invalido' : ''}
+                          onChange={(event) => updateManualRow(index, 'amount', event.target.value)}
+                          inputProps={{ 'aria-label': `Importe factura manual ${index + 1}` }}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <TextField
+                          size="small"
+                          fullWidth
+                          placeholder="Venta mostrador"
+                          value={row.description}
+                          onChange={(event) => updateManualRow(index, 'description', event.target.value)}
+                          inputProps={{ maxLength: 255, 'aria-label': `Detalle factura manual ${index + 1}` }}
+                        />
+                      </TableCell>
+                      <TableCell align="right">
+                        <Button size="small" onClick={() => removeManualRow(index)} disabled={actionLoading}>Quitar</Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
+              <Button variant="text" onClick={addManualRow} disabled={actionLoading || manualRows.length >= 100}>
+                Agregar importe
+              </Button>
+              <FormControl sx={{ minWidth: 170 }} size="small">
+                <InputLabel id="manual-vat-rate-select">Alicuota</InputLabel>
+                <Select
+                  labelId="manual-vat-rate-select"
+                  label="Alicuota"
+                  value={manualVatRate}
+                  onChange={(event) => setManualVatRate(event.target.value)}
+                >
+                  {VAT_RATES.map((item) => (
+                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Box sx={{ flexGrow: 1 }} />
+              <Button
+                variant="contained"
+                startIcon={<ReceiptLongIcon />}
+                disabled={
+                  actionLoading
+                  || manualInvalid
+                  || manualTotal <= 0
+                  || (arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready)
+                }
+                onClick={() => setManualConfirmOpen(true)}
+              >
+                Emitir {manualFilledRows.length} factura(s) · {formatCurrency(manualTotal)}
+              </Button>
+            </Stack>
+
+            {manualResults?.results?.some((item) => !item.ok) && (
+              <Alert severity="warning">
+                {manualResults.results.filter((item) => !item.ok).map((item) => (
+                  <div key={item.row}>Fila {item.row} ({formatCurrency(item.amount)}): {item.detail}</div>
+                ))}
+              </Alert>
+            )}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Dialog open={manualConfirmOpen} onClose={() => setManualConfirmOpen(false)}>
+        <DialogTitle>Confirmar facturas manuales</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Se van a emitir {manualFilledRows.length} Factura(s) B a consumidor final por un total de {formatCurrency(manualTotal)} con {manualVatRate.replace('.', ',')}% de IVA incluido.
+            {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
+              ? ' Son comprobantes reales: una vez autorizados solo se anulan con nota de credito.'
+              : ' Ambiente de prueba: los comprobantes no tienen validez fiscal.'}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setManualConfirmOpen(false)}>Cancelar</Button>
+          <Button variant="contained" onClick={issueManualInvoices}>Emitir</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={Boolean(cancelTarget)} onClose={() => setCancelTarget(null)}>
         <DialogTitle>Anular factura</DialogTitle>
         <DialogContent>
@@ -937,7 +1200,7 @@ export default function BillingPage() {
                           <Typography variant="caption" color="text.secondary">CAE {invoice.cae}</Typography>
                         )}
                       </TableCell>
-                      <TableCell>{invoice.client_name || (invoice.source === 'getnet' ? 'Consumidor final' : '-')}</TableCell>
+                      <TableCell>{invoice.client_name || (['getnet', 'manual'].includes(invoice.source) ? 'Consumidor final' : '-')}</TableCell>
                       <TableCell>{invoice.branch?.name || '-'}</TableCell>
                       <TableCell>
                         <Stack spacing={0.5} alignItems="flex-start">
@@ -965,6 +1228,15 @@ export default function BillingPage() {
                             onClick={() => openCancelDialog(invoice)}
                           >
                             Anular
+                          </Button>
+                        )}
+                        {['error', 'rejected', 'draft'].includes(invoice.status) && (
+                          <Button
+                            size="small"
+                            disabled={actionLoading}
+                            onClick={() => retryInvoice(invoice)}
+                          >
+                            Reintentar
                           </Button>
                         )}
                       </TableCell>

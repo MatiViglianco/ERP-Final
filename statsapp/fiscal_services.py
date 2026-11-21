@@ -48,7 +48,10 @@ def parse_decimal(value, default='0'):
     try:
         if isinstance(value, dict):
             value = value.get('value') or value.get('amount') or value.get('total') or default
-        return Decimal(str(value).replace(',', '.')).quantize(Decimal('0.01'))
+        text = str(value).strip().replace(' ', '').replace('$', '')
+        if ',' in text and '.' in text and text.rfind(',') > text.rfind('.'):
+            text = text.replace('.', '')  # formato argentino: 1.500,50
+        return Decimal(text.replace(',', '.')).quantize(Decimal('0.01'))
     except (InvalidOperation, TypeError, ValueError):
         return Decimal(default)
 
@@ -567,6 +570,71 @@ def create_getnet_invoices(payment_ids, vat_rate=None, created_by=None):
         if invoice is not None:
             invoice.refresh_from_db()
             entry['invoice'] = invoice_payload(invoice, include_lines=False)
+        results.append(entry)
+    return results
+
+
+MAX_MANUAL_INVOICES_PER_REQUEST = 100
+
+
+def create_manual_invoices(items, vat_rate=None, branch=None, created_by=None):
+    """Emite una Factura B a consumidor final por cada importe cargado a mano.
+
+    Sirve para ventas que no pasaron por el posnet (efectivo, transferencia).
+    Devuelve el resultado de cada item; un error no frena a los demas.
+    """
+    if not items:
+        raise FiscalError('Carga al menos un importe para facturar')
+    if len(items) > MAX_MANUAL_INVOICES_PER_REQUEST:
+        raise FiscalError(f'Se pueden emitir hasta {MAX_MANUAL_INVOICES_PER_REQUEST} facturas por vez')
+    rate = parse_vat_rate(vat_rate)
+
+    parsed = []
+    for index, item in enumerate(items, start=1):
+        item = item if isinstance(item, dict) else {'amount': item}
+        amount = parse_decimal(item.get('amount'), default='-1')
+        if amount <= Decimal('0'):
+            raise FiscalError(f'Fila {index}: el importe debe ser mayor a cero')
+        description = str(item.get('description') or '').strip()[:255] or 'Venta mostrador'
+        parsed.append((amount, description))
+
+    voucher_type = int(getattr(settings, 'ARCA_GETNET_VOUCHER_TYPE', 6) or 6)
+    username = getattr(created_by, 'username', '') if created_by else ''
+    results = []
+    for index, (amount, description) in enumerate(parsed, start=1):
+        entry = {'row': index, 'amount': float(amount), 'ok': False, 'detail': '', 'invoice': None}
+        with db_transaction.atomic():
+            invoice = Invoice.objects.create(
+                branch=branch,
+                source=Invoice.Source.MANUAL,
+                status=Invoice.Status.DRAFT,
+                point_of_sale=_default_point_of_sale(),
+                voucher_type=voucher_type,
+                total_amount=amount,
+                net_amount=amount,
+                idempotency_key=f'manual-invoice:{uuid4().hex}',
+                meta={'created_by': username, 'vat_rate': str(rate), 'description': description},
+            )
+            InvoiceLine.objects.create(
+                invoice=invoice,
+                description=description,
+                quantity=Decimal('1'),
+                unit_price=amount,
+                total=amount,
+            )
+        try:
+            invoice = authorize_invoice(invoice)
+            entry['ok'] = True
+            entry['detail'] = 'Factura autorizada'
+        except FiscalError as exc:
+            entry['detail'] = str(exc)
+            invoice.refresh_from_db()
+            if invoice.status == Invoice.Status.DRAFT:
+                invoice.status = Invoice.Status.ERROR
+                invoice.error_message = str(exc)
+                invoice.save(update_fields=['status', 'error_message', 'updated_at'])
+        invoice.refresh_from_db()
+        entry['invoice'] = invoice_payload(invoice, include_lines=False)
         results.append(entry)
     return results
 
