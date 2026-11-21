@@ -11,8 +11,9 @@ test('factura deuda de cuenta corriente y actualiza el tablero', async ({ page }
   await page.getByRole('banner').getByRole('link', { name: 'Facturacion' }).click()
 
   await expect(page.getByRole('heading', { name: 'Facturacion' })).toBeVisible()
-  await expect(page.getByText('Facturado ARCA')).toBeVisible()
+  await expect(page.getByText('Facturado en ARCA')).toBeVisible()
 
+  await page.getByRole('tab', { name: 'Cuenta corriente' }).click()
   await page.getByLabel('Sucursal a facturar').click()
   await page.getByRole('option', { name: 'E2E Central' }).click()
   await page.getByLabel('Cliente').fill('Facturacion')
