@@ -15,6 +15,7 @@ from .fiscal_services import (
     authorize_invoice,
     billing_summary,
     create_account_invoice,
+    create_credit_note,
     create_getnet_invoices,
     create_manual_payment,
     getnet_candidate_payload,
@@ -112,6 +113,17 @@ def invoice_authorize(request, pk):
             invoice.save(update_fields=['status', 'error_message', 'updated_at'])
         return Response({'detail': str(exc), 'invoice': invoice_payload(invoice)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(invoice_payload(invoice))
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def invoice_credit_note(request, pk):
+    get_object_or_404(Invoice, pk=pk)
+    try:
+        credit_note = create_credit_note(pk, reason=request.data.get('reason', ''), created_by=request.user)
+    except FiscalError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(invoice_payload(credit_note), status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])

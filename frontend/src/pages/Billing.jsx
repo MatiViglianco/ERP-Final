@@ -53,7 +53,8 @@ const VAT_RATES = [
   { value: '21', label: 'IVA 21%' },
 ]
 
-const VOUCHER_LETTERS = { 1: 'A', 6: 'B', 11: 'C' }
+const VOUCHER_LETTERS = { 1: 'A', 3: 'NC A', 6: 'B', 8: 'NC B', 11: 'C', 13: 'NC C' }
+const API_INVOICE_CREDIT_NOTE = (id) => `${API_BASE}/billing/invoices/${id}/credit-note/`
 
 function formatVoucher(invoice) {
   if (!invoice?.voucher_number) return '-'
@@ -164,6 +165,8 @@ export default function BillingPage() {
   const [vatRate, setVatRate] = useState('10.5')
   const [getnetResults, setGetnetResults] = useState(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [cancelTarget, setCancelTarget] = useState(null)
+  const [cancelReason, setCancelReason] = useState('')
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({ year, month })
@@ -332,6 +335,36 @@ export default function BillingPage() {
         ? new Set()
         : new Set(getnetCandidates.map((payment) => payment.id))
     ))
+  }
+
+  const openCancelDialog = (invoice) => {
+    setCancelTarget(invoice)
+    setCancelReason('')
+  }
+
+  const cancelInvoice = async () => {
+    const target = cancelTarget
+    setCancelTarget(null)
+    if (!target) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    try {
+      const resp = await authFetch(API_INVOICE_CREDIT_NOTE(target.id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: cancelReason }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo emitir la nota de credito')
+      setSuccess(`Factura ${formatVoucher(target)} anulada con ${formatVoucher(data)} (CAE ${data.cae})`)
+      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
+    } catch (err) {
+      setError(err.message)
+      await loadBilling()
+    } finally {
+      setActionLoading(false)
+    }
   }
 
   const invoiceGetnetPayments = async () => {
@@ -705,6 +738,33 @@ export default function BillingPage() {
         </CardContent>
       </Card>
 
+      <Dialog open={Boolean(cancelTarget)} onClose={() => setCancelTarget(null)}>
+        <DialogTitle>Anular factura</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            <DialogContentText>
+              Se va a emitir una nota de credito por {formatCurrency(cancelTarget?.total_amount)} que anula la
+              {' '}{formatVoucher(cancelTarget)}.
+              {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
+                ? ' Es un comprobante real ante ARCA y no se puede deshacer.'
+                : ' Ambiente de prueba: el comprobante no tiene validez fiscal.'}
+              {' '}Los cupones de esta factura vuelven a quedar disponibles para facturar.
+            </DialogContentText>
+            <TextField
+              label="Motivo (opcional)"
+              value={cancelReason}
+              onChange={(event) => setCancelReason(event.target.value)}
+              inputProps={{ maxLength: 255 }}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCancelTarget(null)}>Cancelar</Button>
+          <Button variant="contained" color="error" onClick={cancelInvoice}>Emitir nota de credito</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogTitle>Confirmar facturacion</DialogTitle>
         <DialogContent>
@@ -864,6 +924,7 @@ export default function BillingPage() {
                     <TableCell>Sucursal</TableCell>
                     <TableCell>Estado</TableCell>
                     <TableCell align="right">Total</TableCell>
+                    <TableCell />
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -879,14 +940,39 @@ export default function BillingPage() {
                       <TableCell>{invoice.client_name || (invoice.source === 'getnet' ? 'Consumidor final' : '-')}</TableCell>
                       <TableCell>{invoice.branch?.name || '-'}</TableCell>
                       <TableCell>
-                        <Chip size="small" color={statusColor(invoice.status)} label={invoice.status_label} />
+                        <Stack spacing={0.5} alignItems="flex-start">
+                          <Chip size="small" color={statusColor(invoice.status)} label={invoice.status_label} />
+                          {invoice.cancelled_by_voucher && (
+                            <Typography variant="caption" color="text.secondary">Por {invoice.cancelled_by_voucher}</Typography>
+                          )}
+                          {invoice.cancels_voucher && (
+                            <Typography variant="caption" color="text.secondary">Anula {invoice.cancels_voucher}</Typography>
+                          )}
+                          {invoice.error_message && invoice.status !== 'authorized' && (
+                            <Typography variant="caption" color="error">{invoice.error_message}</Typography>
+                          )}
+                        </Stack>
                       </TableCell>
-                      <TableCell align="right">{formatCurrency(invoice.total_amount)}</TableCell>
+                      <TableCell align="right">
+                        {invoice.is_credit_note ? `- ${formatCurrency(invoice.total_amount)}` : formatCurrency(invoice.total_amount)}
+                      </TableCell>
+                      <TableCell align="right">
+                        {invoice.status === 'authorized' && !invoice.is_credit_note && invoice.voucher_number && (
+                          <Button
+                            size="small"
+                            color="error"
+                            disabled={actionLoading}
+                            onClick={() => openCancelDialog(invoice)}
+                          >
+                            Anular
+                          </Button>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                   {!invoices.length && (
                     <TableRow>
-                      <TableCell colSpan={6}>
+                      <TableCell colSpan={7}>
                         <Typography color="text.secondary">Sin facturas en el periodo.</Typography>
                       </TableCell>
                     </TableRow>

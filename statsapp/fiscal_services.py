@@ -82,6 +82,11 @@ def invoice_payload(invoice, include_lines=True):
         'cae': invoice.cae,
         'cae_due_date': invoice.cae_due_date.isoformat() if invoice.cae_due_date else None,
         'external_reference': invoice.external_reference,
+        'is_credit_note': invoice.voucher_type in {3, 8, 13},
+        'cancels_id': str(invoice.cancels_id) if invoice.cancels_id else None,
+        'cancelled_by_voucher': (invoice.meta or {}).get('cancelled_voucher', ''),
+        'cancels_voucher': (invoice.meta or {}).get('cancels_voucher', ''),
+        'reason': (invoice.meta or {}).get('reason') or (invoice.meta or {}).get('cancel_reason', ''),
         'error_message': invoice.error_message,
         'created_at': invoice.created_at.isoformat() if invoice.created_at else None,
     }
@@ -265,6 +270,8 @@ def _next_mock_voucher_number(invoice):
 def authorize_invoice(invoice):
     if invoice.status == Invoice.Status.AUTHORIZED:
         return invoice
+    if invoice.status == Invoice.Status.CANCELLED:
+        raise FiscalError('La factura esta anulada y no se puede volver a autorizar')
     if invoice.total_amount <= Decimal('0'):
         raise FiscalError('La factura debe tener importe mayor a cero')
 
@@ -308,6 +315,102 @@ def authorize_invoice(invoice):
             'updated_at',
         ])
         return locked
+
+
+CREDIT_NOTE_TYPES = {1: 3, 6: 8, 11: 13}
+CREDIT_NOTE_VOUCHER_TYPES = set(CREDIT_NOTE_TYPES.values())
+
+
+def _format_voucher(invoice):
+    letters = {1: 'Factura A', 3: 'Nota de credito A', 6: 'Factura B', 8: 'Nota de credito B',
+               11: 'Factura C', 13: 'Nota de credito C'}
+    label = letters.get(invoice.voucher_type, f'Comprobante {invoice.voucher_type}')
+    if not invoice.voucher_number:
+        return label
+    return f'{label} {invoice.point_of_sale:05d}-{invoice.voucher_number:08d}'
+
+
+def create_credit_note(invoice_id, reason='', created_by=None):
+    """Anula una factura autorizada emitiendo su nota de credito por el total.
+
+    Si un intento anterior fallo, reutiliza esa nota de credito en lugar de crear otra.
+    Cuando ARCA la autoriza, la factura queda anulada y los cupones que cubria
+    vuelven a quedar disponibles para facturar.
+    """
+    reason = (reason or '').strip()[:255]
+    with db_transaction.atomic():
+        original = Invoice.objects.select_for_update().get(pk=invoice_id)
+        if original.voucher_type in CREDIT_NOTE_VOUCHER_TYPES:
+            raise FiscalError('Una nota de credito no se puede anular desde aca')
+        if original.status == Invoice.Status.CANCELLED:
+            raise FiscalError('La factura ya esta anulada')
+        if original.status != Invoice.Status.AUTHORIZED or not original.voucher_number:
+            raise FiscalError('Solo se pueden anular facturas autorizadas por ARCA')
+        credit_type = CREDIT_NOTE_TYPES.get(original.voucher_type)
+        if credit_type is None:
+            raise FiscalError('Este tipo de comprobante no se puede anular con nota de credito')
+
+        credit_note = Invoice.objects.filter(cancels=original).first()
+        if credit_note and credit_note.status == Invoice.Status.AUTHORIZED:
+            raise FiscalError('La factura ya tiene una nota de credito autorizada')
+        if credit_note is None:
+            meta = {
+                'created_by': getattr(created_by, 'username', '') if created_by else '',
+                'reason': reason,
+                'cancels_voucher': _format_voucher(original),
+            }
+            if (original.meta or {}).get('vat_rate'):
+                meta['vat_rate'] = original.meta['vat_rate']
+            credit_note = Invoice.objects.create(
+                client=original.client,
+                branch=original.branch,
+                source=original.source,
+                status=Invoice.Status.DRAFT,
+                point_of_sale=original.point_of_sale,
+                voucher_type=credit_type,
+                net_amount=original.net_amount,
+                vat_amount=original.vat_amount,
+                total_amount=original.total_amount,
+                external_reference=original.external_reference,
+                cancels=original,
+                idempotency_key=f'credit-note:{original.id}',
+                meta=meta,
+            )
+            InvoiceLine.objects.create(
+                invoice=credit_note,
+                description=f'Anulacion de {_format_voucher(original)}'[:255],
+                quantity=Decimal('1'),
+                unit_price=original.total_amount,
+                total=original.total_amount,
+            )
+        elif reason:
+            meta = dict(credit_note.meta or {})
+            meta['reason'] = reason
+            credit_note.meta = meta
+            credit_note.save(update_fields=['meta', 'updated_at'])
+
+    try:
+        credit_note = authorize_invoice(credit_note)
+    except FiscalError:
+        credit_note.refresh_from_db()
+        if credit_note.status == Invoice.Status.DRAFT:
+            credit_note.status = Invoice.Status.ERROR
+            credit_note.save(update_fields=['status', 'updated_at'])
+        raise
+
+    with db_transaction.atomic():
+        original = Invoice.objects.select_for_update().get(pk=invoice_id)
+        meta = dict(original.meta or {})
+        meta['cancelled_by'] = str(credit_note.id)
+        meta['cancelled_voucher'] = _format_voucher(credit_note)
+        if reason:
+            meta['cancel_reason'] = reason
+        original.status = Invoice.Status.CANCELLED
+        original.meta = meta
+        original.save(update_fields=['status', 'meta', 'updated_at'])
+        # Los cupones vuelven a estar disponibles para facturar.
+        Payment.objects.filter(invoice=original).update(invoice=None)
+    return credit_note
 
 
 GETNET_INVOICEABLE_PAYMENT_STATUSES = (Payment.Status.APPROVED, Payment.Status.RECONCILED)
@@ -408,7 +511,8 @@ def _getnet_invoice_for_payment(payment_id, vat_rate, created_by):
             total_amount=payment.amount,
             net_amount=payment.amount,
             external_reference=payment.external_id[:128],
-            idempotency_key=f'getnet-invoice:{payment.id}',
+            # Un cupon puede volver a facturarse si su factura anterior se anulo.
+            idempotency_key=f'getnet-invoice:{payment.id}:{uuid4().hex[:12]}',
             meta={
                 'created_by': getattr(created_by, 'username', '') if created_by else '',
                 'payment_id': str(payment.id),
@@ -612,6 +716,9 @@ def create_manual_payment(source, amount, payment_date=None, client=None, invoic
 
 def billing_summary(start_date, end_date, getnet_terminal_id=None):
     invoices = Invoice.objects.filter(issue_date__gte=start_date, issue_date__lte=end_date)
+    credit_notes = invoices.filter(voucher_type__in=CREDIT_NOTE_VOUCHER_TYPES)
+    invoices = invoices.exclude(voucher_type__in=CREDIT_NOTE_VOUCHER_TYPES)
+    # Una factura anulada sale del total; su nota de credito no se descuenta otra vez.
     authorized = invoices.filter(status=Invoice.Status.AUTHORIZED)
     payments = Payment.objects.filter(
         date__gte=start_date,
@@ -666,6 +773,8 @@ def billing_summary(start_date, end_date, getnet_terminal_id=None):
             'draft_total': float(invoices.filter(status=Invoice.Status.DRAFT).aggregate(total=Sum('total_amount')).get('total') or 0),
             'count': invoices.count(),
             'authorized_count': authorized.count(),
+            'cancelled_count': invoices.filter(status=Invoice.Status.CANCELLED).count(),
+            'credit_notes_count': credit_notes.filter(status=Invoice.Status.AUTHORIZED).count(),
         },
         'collections': {
             'getnet': payment_totals.get(Payment.Source.GETNET, 0.0),

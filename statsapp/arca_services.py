@@ -18,6 +18,7 @@ from django.db import transaction as db_transaction
 from django.utils import timezone
 
 from .arca_client import (
+    CREDIT_NOTE_VOUCHER_TYPES,
     WSFE_SEQUENCE_ERROR_CODES,
     ArcaConfigurationError,
     ArcaError,
@@ -132,11 +133,33 @@ def _validate_ready(invoice):
         raise ArcaConfigurationError('La factura no tiene tipo de comprobante')
     if invoice.voucher_type not in {6, 7, 8}:
         raise ArcaConfigurationError('Por ahora solo se emiten comprobantes B a consumidor final')
+    if invoice.voucher_type in CREDIT_NOTE_VOUCHER_TYPES:
+        original = invoice.cancels
+        if original is None or not original.voucher_number:
+            raise ArcaConfigurationError('La nota de credito no tiene una factura autorizada asociada')
+        if original.point_of_sale != invoice.point_of_sale:
+            raise ArcaConfigurationError('La nota de credito debe emitirse en el mismo punto de venta que la factura')
+        if invoice.total_amount != original.total_amount:
+            raise ArcaConfigurationError('La nota de credito debe anular el total de la factura')
+        return
     limit = Decimal(str(getattr(settings, 'ARCA_ANONYMOUS_CONSUMER_LIMIT', '10000000')))
     if invoice.total_amount >= limit:
         raise ArcaConfigurationError(
             f'El importe supera {limit} y ARCA exige identificar al consumidor final'
         )
+
+
+def _associated_vouchers(invoice):
+    if invoice.voucher_type not in CREDIT_NOTE_VOUCHER_TYPES:
+        return None
+    original = invoice.cancels
+    return [{
+        'voucher_type': original.voucher_type,
+        'point_of_sale': original.point_of_sale,
+        'number': original.voucher_number,
+        'cuit': arca_cuit(),
+        'issue_date': original.issue_date,
+    }]
 
 
 def _sequence_row(invoice):
@@ -209,6 +232,8 @@ def _authorize_invoice_wsfe(invoice, client):
         locked = Invoice.objects.select_for_update().get(pk=invoice.pk)
         if locked.status == Invoice.Status.AUTHORIZED:
             return locked, None
+        if locked.status == Invoice.Status.CANCELLED:
+            return locked, ArcaConfigurationError('La factura esta anulada y no se puede volver a autorizar')
         _validate_ready(locked)
         sequence = _sequence_row(locked)
 
@@ -243,6 +268,7 @@ def _authorize_invoice_wsfe(invoice, client):
                     doc_type=ANONYMOUS_DOC_TYPE,
                     doc_number=0,
                     receiver_vat_condition=CONSUMER_FINAL_VAT_CONDITION,
+                    associated=_associated_vouchers(locked),
                 )
             except ArcaError as exc:
                 # Quedo en duda: se guarda el numero para recuperarlo en el proximo intento.
