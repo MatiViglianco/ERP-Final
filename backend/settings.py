@@ -166,11 +166,24 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DJANGO_FILE_UPLOAD_MAX_MEMORY_
 INACTIVITY_TIMEOUT = None
 
 # Facturacion. ARCA_PROVIDER=mock permite probar el flujo completo sin emitir
-# comprobantes reales. Cambiar a un proveedor real solo despues de configurar
-# CUIT, certificado, clave y punto de venta WSFEv1.
+# comprobantes reales. ARCA_PROVIDER=wsfe usa WSAA + WSFEv1 de ARCA; requiere
+# CUIT, certificado, clave privada y punto de venta "RECE para web services".
+# ARCA_ENVIRONMENT=homologacion apunta a los servidores de prueba (sin validez
+# fiscal); produccion emite comprobantes reales.
 ARCA_PROVIDER = os.environ.get("ARCA_PROVIDER", "mock")
+ARCA_ENVIRONMENT = os.environ.get("ARCA_ENVIRONMENT", "homologacion").strip().lower()
+ARCA_CUIT = os.environ.get("ARCA_CUIT", "").replace("-", "").strip()
+ARCA_CERT_PATH = os.environ.get("ARCA_CERT_PATH", "")
+ARCA_KEY_PATH = os.environ.get("ARCA_KEY_PATH", "")
+ARCA_HTTP_TIMEOUT = int(os.environ.get("ARCA_HTTP_TIMEOUT", "30") or "30")
 ARCA_DEFAULT_POINT_OF_SALE = int(os.environ.get("ARCA_DEFAULT_POINT_OF_SALE", "0") or "0")
 ARCA_DEFAULT_VOUCHER_TYPE = int(os.environ.get("ARCA_DEFAULT_VOUCHER_TYPE", "0") or "0")
+# Cupones de posnet (Getnet) se facturan como Factura B (6) a consumidor final,
+# con el IVA incluido en el importe cobrado.
+ARCA_GETNET_VOUCHER_TYPE = int(os.environ.get("ARCA_GETNET_VOUCHER_TYPE", "6") or "6")
+ARCA_DEFAULT_VAT_RATE = os.environ.get("ARCA_DEFAULT_VAT_RATE", "10.5")
+# Por encima de este importe ARCA exige identificar al consumidor final.
+ARCA_ANONYMOUS_CONSUMER_LIMIT = os.environ.get("ARCA_ANONYMOUS_CONSUMER_LIMIT", "10000000")
 GETNET_WEBHOOK_SECRET = os.environ.get("GETNET_WEBHOOK_SECRET", "")
 
 # Logging a stdout para que los errores (p. ej. fallas del OCR) queden visibles

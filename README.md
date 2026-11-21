@@ -131,7 +131,12 @@ GitHub Actions runs the Django suite against PostgreSQL 16 for every pull reques
 - `.github/workflows/deploy-frontend.yml` builds and publishes the React client to GitHub Pages.
 - `.github/workflows/deploy-backend-dokploy.yml` deploys a successful main-branch revision to Dokploy.
 
-Real ARCA/WSFE authorization is intentionally not enabled by default. Activation requires the correct certificate, service association, tax regime and point-of-sale configuration; until then, keep `ARCA_PROVIDER=mock`.
+Real ARCA/WSFE authorization is intentionally not enabled by default. `ARCA_PROVIDER=wsfe` enables the built-in WSAA + WSFEv1 client (`statsapp/arca_client.py`), used to issue Factura B to final consumers from selected Getnet/posnet coupons:
+
+- `ARCA_ENVIRONMENT=homologacion` targets ARCA's test servers; `produccion` issues real vouchers.
+- `ARCA_CUIT`, `ARCA_CERT_PATH`, `ARCA_KEY_PATH` and `ARCA_DEFAULT_POINT_OF_SALE` (a "RECE para aplicativo y web services" point of sale) are required. Certificate and private key are mounted as files and never committed.
+- Voucher numbers always come from `FECompUltimoAutorizado`, so the point of sale can be shared with another system. The WSAA access ticket is cached in the database because ARCA refuses a new one while the current one is valid.
+- An attempt left uncertain by a network error is recovered with `FECompConsultar` before any new request, so a coupon is never invoiced twice.
 
 ## Repository map
 

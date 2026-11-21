@@ -7,6 +7,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 
+from .arca_services import arca_status
 from .getnet_services import GetnetImportError, import_getnet_csv, terminal_payload
 from .fiscal_services import (
     FiscalError,
@@ -14,7 +15,10 @@ from .fiscal_services import (
     authorize_invoice,
     billing_summary,
     create_account_invoice,
+    create_getnet_invoices,
     create_manual_payment,
+    getnet_candidate_payload,
+    getnet_invoiceable_payments,
     invoice_payload,
     payment_payload,
     process_getnet_webhook,
@@ -101,11 +105,57 @@ def invoice_authorize(request, pk):
     try:
         invoice = authorize_invoice(invoice)
     except FiscalError as exc:
-        invoice.status = Invoice.Status.ERROR
-        invoice.error_message = str(exc)
-        invoice.save(update_fields=['status', 'error_message', 'updated_at'])
+        invoice.refresh_from_db()
+        if invoice.status == Invoice.Status.DRAFT:
+            invoice.status = Invoice.Status.ERROR
+            invoice.error_message = str(exc)
+            invoice.save(update_fields=['status', 'error_message', 'updated_at'])
         return Response({'detail': str(exc), 'invoice': invoice_payload(invoice)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(invoice_payload(invoice))
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def getnet_invoiceable(request):
+    start = _parse_date(request.query_params.get('start_date'))
+    end = _parse_date(request.query_params.get('end_date'))
+    if not start or not end:
+        start, end = _month_range(request)
+    payments = getnet_invoiceable_payments(
+        start,
+        end,
+        terminal_id=_positive_int(request.query_params.get('terminal_id')),
+        branch_id=_positive_int(request.query_params.get('branch_id')),
+    )
+    return Response([getnet_candidate_payload(payment) for payment in payments[:1000]])
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def getnet_invoices_create(request):
+    payment_ids = request.data.get('payment_ids') or []
+    if not isinstance(payment_ids, list):
+        return Response({'detail': 'payment_ids debe ser una lista'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        results = create_getnet_invoices(
+            [str(payment_id) for payment_id in payment_ids],
+            vat_rate=request.data.get('vat_rate'),
+            created_by=request.user,
+        )
+    except FiscalError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    authorized = sum(1 for item in results if item['ok'])
+    return Response({
+        'authorized': authorized,
+        'failed': len(results) - authorized,
+        'results': results,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def arca_status_view(request):
+    return Response(arca_status())
 
 
 @api_view(['GET'])

@@ -8,6 +8,11 @@ import {
   CardContent,
   Checkbox,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
   FormControl,
   InputLabel,
@@ -39,6 +44,36 @@ const API_GETNET_TERMINAL = (id) => `${API_GETNET_TERMINALS}${id}/`
 const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
 const API_ACCOUNT_PREVIEW = (id) => `${API_BASE}/billing/accounts/${id}/preview/`
 const API_ACCOUNT_INVOICE = (id) => `${API_BASE}/billing/accounts/${id}/invoices/`
+const API_GETNET_INVOICEABLE = `${API_BASE}/billing/getnet/invoiceable/`
+const API_GETNET_INVOICES = `${API_BASE}/billing/getnet/invoices/`
+const API_ARCA_STATUS = `${API_BASE}/billing/arca/status/`
+
+const VAT_RATES = [
+  { value: '10.5', label: 'IVA 10,5%' },
+  { value: '21', label: 'IVA 21%' },
+]
+
+const VOUCHER_LETTERS = { 1: 'A', 6: 'B', 11: 'C' }
+
+function formatVoucher(invoice) {
+  if (!invoice?.voucher_number) return '-'
+  const letter = VOUCHER_LETTERS[invoice.voucher_type] || invoice.voucher_type
+  const pos = String(invoice.point_of_sale || 0).padStart(5, '0')
+  const number = String(invoice.voucher_number).padStart(8, '0')
+  return `${letter} ${pos}-${number}`
+}
+
+function arcaModeLabel(arca) {
+  if (!arca) return 'Consultando ARCA...'
+  if (arca.provider !== 'wsfe') return 'Simulado (sin validez fiscal)'
+  return arca.environment === 'produccion' ? 'ARCA produccion' : 'ARCA homologacion (prueba)'
+}
+
+function arcaModeColor(arca) {
+  if (!arca || arca.provider !== 'wsfe') return 'default'
+  if (!arca.ready) return 'error'
+  return arca.environment === 'produccion' ? 'success' : 'warning'
+}
 
 const MONTHS = [
   { value: '1', label: 'Enero' },
@@ -123,6 +158,12 @@ export default function BillingPage() {
     date: currentIsoDate(),
     external_id: '',
   })
+  const [arcaStatus, setArcaStatus] = useState(null)
+  const [getnetCandidates, setGetnetCandidates] = useState([])
+  const [selectedPayments, setSelectedPayments] = useState(new Set())
+  const [vatRate, setVatRate] = useState('10.5')
+  const [getnetResults, setGetnetResults] = useState(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({ year, month })
@@ -136,6 +177,10 @@ export default function BillingPage() {
       .filter((tx) => selectedTx.has(tx.id))
       .reduce((acc, tx) => acc + Number(tx.remaining || 0), 0)
   }, [preview, selectedTx])
+
+  const selectedPaymentsTotal = useMemo(() => getnetCandidates
+    .filter((payment) => selectedPayments.has(payment.id))
+    .reduce((acc, payment) => acc + Number(payment.amount || 0), 0), [getnetCandidates, selectedPayments])
 
   const totalCollected = useMemo(() => {
     const collections = summary?.collections || {}
@@ -201,6 +246,29 @@ export default function BillingPage() {
     }
   }, [authFetch])
 
+  const loadArcaStatus = useCallback(async () => {
+    try {
+      const resp = await authFetch(API_ARCA_STATUS)
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudo consultar ARCA')
+      setArcaStatus(data)
+    } catch (err) {
+      setArcaStatus({ provider: 'wsfe', ready: false, error: err.message })
+    }
+  }, [authFetch])
+
+  const loadGetnetCandidates = useCallback(async () => {
+    try {
+      const resp = await authFetch(`${API_GETNET_INVOICEABLE}?${queryString}`)
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudieron cargar los cupones a facturar')
+      setGetnetCandidates(data || [])
+      setSelectedPayments((prev) => new Set((data || []).filter((item) => prev.has(item.id)).map((item) => item.id)))
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [authFetch, queryString])
+
   const loadPreview = useCallback(async (client) => {
     setPreview(null)
     setSelectedTx(new Set())
@@ -240,6 +308,58 @@ export default function BillingPage() {
   useEffect(() => {
     loadTerminals()
   }, [loadTerminals])
+
+  useEffect(() => {
+    loadArcaStatus()
+  }, [loadArcaStatus])
+
+  useEffect(() => {
+    loadGetnetCandidates()
+  }, [loadGetnetCandidates])
+
+  const togglePayment = (paymentId) => {
+    setSelectedPayments((prev) => {
+      const next = new Set(prev)
+      if (next.has(paymentId)) next.delete(paymentId)
+      else next.add(paymentId)
+      return next
+    })
+  }
+
+  const toggleAllPayments = () => {
+    setSelectedPayments((prev) => (
+      prev.size === getnetCandidates.length
+        ? new Set()
+        : new Set(getnetCandidates.map((payment) => payment.id))
+    ))
+  }
+
+  const invoiceGetnetPayments = async () => {
+    setConfirmOpen(false)
+    if (selectedPayments.size === 0) return
+    setActionLoading(true)
+    setError('')
+    setSuccess('')
+    setGetnetResults(null)
+    try {
+      const resp = await authFetch(API_GETNET_INVOICES, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_ids: Array.from(selectedPayments), vat_rate: vatRate }),
+      })
+      const data = await resp.json()
+      if (!resp.ok) throw new Error(data.detail || 'No se pudieron facturar los cupones')
+      setGetnetResults(data)
+      if (data.authorized) setSuccess(`${data.authorized} factura(s) autorizada(s)`)
+      if (data.failed) setError(`${data.failed} cupon(es) no se pudieron facturar. Revisa el detalle.`)
+      setSelectedPayments(new Set())
+      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
 
   useEffect(() => {
     loadPreview(selectedClient)
@@ -475,6 +595,135 @@ export default function BillingPage() {
       <Card>
         <CardContent>
           <Stack spacing={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
+              <Box>
+                <Typography variant="h6" fontWeight={700}>Facturar cupones posnet</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Cada cupon seleccionado genera una Factura B a consumidor final con el IVA incluido en el importe.
+                </Typography>
+              </Box>
+              <Stack spacing={0.5} alignItems={{ md: 'flex-end' }}>
+                <Chip color={arcaModeColor(arcaStatus)} label={arcaModeLabel(arcaStatus)} />
+                {arcaStatus?.provider === 'wsfe' && arcaStatus?.ready && (
+                  <Typography variant="caption" color="text.secondary">
+                    Punto de venta {arcaStatus.point_of_sale} · ultimo comprobante {arcaStatus.last_voucher_number}
+                  </Typography>
+                )}
+              </Stack>
+            </Stack>
+            {arcaStatus?.error && (
+              <Alert severity={arcaStatus.provider === 'wsfe' ? 'error' : 'info'}>{arcaStatus.error}</Alert>
+            )}
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
+              <FormControl sx={{ minWidth: 170 }}>
+                <InputLabel id="vat-rate-select">Alicuota</InputLabel>
+                <Select
+                  labelId="vat-rate-select"
+                  label="Alicuota"
+                  value={vatRate}
+                  onChange={(event) => setVatRate(event.target.value)}
+                >
+                  {VAT_RATES.map((item) => (
+                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Button
+                variant="contained"
+                startIcon={<ReceiptLongIcon />}
+                disabled={actionLoading || selectedPayments.size === 0 || (arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready)}
+                onClick={() => setConfirmOpen(true)}
+              >
+                Facturar {selectedPayments.size} cupon(es) · {formatCurrency(selectedPaymentsTotal)}
+              </Button>
+            </Stack>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      inputProps={{ 'aria-label': 'Seleccionar todos los cupones' }}
+                      checked={getnetCandidates.length > 0 && selectedPayments.size === getnetCandidates.length}
+                      indeterminate={selectedPayments.size > 0 && selectedPayments.size < getnetCandidates.length}
+                      onChange={toggleAllPayments}
+                    />
+                  </TableCell>
+                  <TableCell>Fecha</TableCell>
+                  <TableCell>Terminal</TableCell>
+                  <TableCell>Tarjeta</TableCell>
+                  <TableCell>Cupon</TableCell>
+                  <TableCell>Estado</TableCell>
+                  <TableCell align="right">Importe</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {getnetCandidates.map((payment) => (
+                  <TableRow key={payment.id} hover>
+                    <TableCell padding="checkbox">
+                      <Checkbox
+                        inputProps={{ 'aria-label': `Seleccionar cupon ${payment.coupon_number || payment.external_id}` }}
+                        checked={selectedPayments.has(payment.id)}
+                        onChange={() => togglePayment(payment.id)}
+                      />
+                    </TableCell>
+                    <TableCell>{payment.date}</TableCell>
+                    <TableCell>{payment.terminal?.code || '-'}</TableCell>
+                    <TableCell>{[payment.brand, payment.card_last_four].filter(Boolean).join(' ') || '-'}</TableCell>
+                    <TableCell>{payment.coupon_number || payment.external_id}</TableCell>
+                    <TableCell>
+                      {payment.invoice_status ? (
+                        <Stack spacing={0.5} alignItems="flex-start">
+                          <Chip size="small" color={statusColor(payment.invoice_status)} label="Reintentar" />
+                          {payment.invoice_error && (
+                            <Typography variant="caption" color="error">{payment.invoice_error}</Typography>
+                          )}
+                        </Stack>
+                      ) : (
+                        <Typography variant="caption" color="text.secondary">Sin facturar</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell align="right">{formatCurrency(payment.amount)}</TableCell>
+                  </TableRow>
+                ))}
+                {!getnetCandidates.length && (
+                  <TableRow>
+                    <TableCell colSpan={7}>
+                      <Typography color="text.secondary">No hay cupones pendientes de facturar en el periodo.</Typography>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+            {getnetResults?.results?.some((item) => !item.ok) && (
+              <Alert severity="warning">
+                {getnetResults.results.filter((item) => !item.ok).map((item) => (
+                  <div key={item.payment_id}>{item.detail}</div>
+                ))}
+              </Alert>
+            )}
+          </Stack>
+        </CardContent>
+      </Card>
+
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <DialogTitle>Confirmar facturacion</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Se van a emitir {selectedPayments.size} Factura(s) B a consumidor final por {formatCurrency(selectedPaymentsTotal)} con {vatRate.replace('.', ',')}% de IVA incluido.
+            {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
+              ? ' Son comprobantes reales: una vez autorizados solo se anulan con nota de credito.'
+              : ' Ambiente de prueba: los comprobantes no tienen validez fiscal.'}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)}>Cancelar</Button>
+          <Button variant="contained" onClick={invoiceGetnetPayments}>Emitir</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Card>
+        <CardContent>
+          <Stack spacing={2}>
             <Box>
               <Typography variant="h6" fontWeight={700}>Facturar cuenta corriente</Typography>
               <Typography variant="body2" color="text.secondary">
@@ -610,6 +859,7 @@ export default function BillingPage() {
                 <TableHead>
                   <TableRow>
                     <TableCell>Fecha</TableCell>
+                    <TableCell>Comprobante</TableCell>
                     <TableCell>Cliente</TableCell>
                     <TableCell>Sucursal</TableCell>
                     <TableCell>Estado</TableCell>
@@ -620,7 +870,13 @@ export default function BillingPage() {
                   {invoices.map((invoice) => (
                     <TableRow key={invoice.id}>
                       <TableCell>{invoice.issue_date}</TableCell>
-                      <TableCell>{invoice.client_name || '-'}</TableCell>
+                      <TableCell>
+                        <Typography variant="body2">{formatVoucher(invoice)}</Typography>
+                        {invoice.cae && (
+                          <Typography variant="caption" color="text.secondary">CAE {invoice.cae}</Typography>
+                        )}
+                      </TableCell>
+                      <TableCell>{invoice.client_name || (invoice.source === 'getnet' ? 'Consumidor final' : '-')}</TableCell>
                       <TableCell>{invoice.branch?.name || '-'}</TableCell>
                       <TableCell>
                         <Chip size="small" color={statusColor(invoice.status)} label={invoice.status_label} />
@@ -630,7 +886,7 @@ export default function BillingPage() {
                   ))}
                   {!invoices.length && (
                     <TableRow>
-                      <TableCell colSpan={5}>
+                      <TableCell colSpan={6}>
                         <Typography color="text.secondary">Sin facturas en el periodo.</Typography>
                       </TableCell>
                     </TableRow>

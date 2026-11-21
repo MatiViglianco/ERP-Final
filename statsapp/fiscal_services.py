@@ -269,9 +269,17 @@ def authorize_invoice(invoice):
         raise FiscalError('La factura debe tener importe mayor a cero')
 
     provider = getattr(settings, 'ARCA_PROVIDER', 'mock').lower()
+    if provider == 'wsfe':
+        from .arca_client import ArcaError
+        from .arca_services import authorize_invoice_wsfe
+
+        try:
+            return authorize_invoice_wsfe(invoice)
+        except ArcaError as exc:
+            raise FiscalError(str(exc)) from exc
     if provider not in {'mock', 'disabled'}:
         raise ProviderConfigurationError(
-            'La integracion real con ARCA requiere certificado, CUIT, punto de venta y cliente WSFEv1 configurados'
+            'ARCA_PROVIDER debe ser mock, disabled o wsfe'
         )
     if provider == 'disabled':
         raise ProviderConfigurationError('ARCA_PROVIDER esta deshabilitado')
@@ -300,6 +308,163 @@ def authorize_invoice(invoice):
             'updated_at',
         ])
         return locked
+
+
+GETNET_INVOICEABLE_PAYMENT_STATUSES = (Payment.Status.APPROVED, Payment.Status.RECONCILED)
+GETNET_RETRYABLE_INVOICE_STATUSES = (Invoice.Status.DRAFT, Invoice.Status.ERROR, Invoice.Status.REJECTED)
+SUPPORTED_VAT_RATES = (Decimal('10.5'), Decimal('21'))
+
+
+def getnet_invoiceable_payments(start_date, end_date, terminal_id=None, branch_id=None):
+    """Cupones Getnet cobrados que todavia no tienen factura autorizada."""
+    queryset = (
+        Payment.objects
+        .select_related('terminal', 'branch', 'invoice')
+        .filter(
+            source=Payment.Source.GETNET,
+            status__in=GETNET_INVOICEABLE_PAYMENT_STATUSES,
+            amount__gt=0,
+            date__gte=start_date,
+            date__lte=end_date,
+        )
+        .filter(Q(invoice__isnull=True) | Q(invoice__status__in=GETNET_RETRYABLE_INVOICE_STATUSES))
+    )
+    if terminal_id:
+        queryset = queryset.filter(terminal_id=terminal_id)
+    if branch_id:
+        queryset = queryset.filter(branch_id=branch_id)
+    return queryset.order_by('date', 'created_at')
+
+
+def getnet_candidate_payload(payment):
+    getnet = (payment.meta or {}).get('getnet_csv') or {}
+    invoice = payment.invoice
+    return {
+        **payment_payload(payment),
+        'brand': getnet.get('brand', ''),
+        'card_last_four': getnet.get('card_last_four', ''),
+        'coupon_number': getnet.get('coupon_number', ''),
+        'transaction_type': getnet.get('transaction_type', ''),
+        'invoice_status': invoice.status if invoice else None,
+        'invoice_error': invoice.error_message if invoice else '',
+    }
+
+
+def parse_vat_rate(value):
+    if value in (None, ''):
+        value = getattr(settings, 'ARCA_DEFAULT_VAT_RATE', '10.5')
+    try:
+        rate = Decimal(str(value).replace(',', '.'))
+    except InvalidOperation as exc:
+        raise FiscalError('Alicuota de IVA invalida') from exc
+    if rate not in SUPPORTED_VAT_RATES:
+        raise FiscalError('La alicuota de IVA debe ser 10,5% o 21%')
+    return rate
+
+
+def _getnet_line_description(payment):
+    getnet = (payment.meta or {}).get('getnet_csv') or {}
+    parts = ['Venta con tarjeta']
+    if getnet.get('brand'):
+        parts.append(getnet['brand'])
+    if payment.terminal:
+        parts.append(f'terminal {payment.terminal.code}')
+    if getnet.get('coupon_number'):
+        parts.append(f'cupon {getnet["coupon_number"]}')
+    return ' - '.join(parts)[:255]
+
+
+def _getnet_invoice_for_payment(payment_id, vat_rate, created_by):
+    """Crea (o reutiliza si fallo antes) la factura de un cupon. Bloquea el cupon."""
+    with db_transaction.atomic():
+        payment = (
+            Payment.objects
+            .select_for_update(of=('self',))
+            .select_related('terminal', 'branch', 'invoice')
+            .get(pk=payment_id)
+        )
+        if payment.source != Payment.Source.GETNET:
+            raise FiscalError('El cobro no es un cupon Getnet')
+        if payment.status not in GETNET_INVOICEABLE_PAYMENT_STATUSES or payment.amount <= Decimal('0'):
+            raise FiscalError('El cupon no esta aprobado o no tiene importe a facturar')
+        invoice = payment.invoice
+        if invoice and invoice.status == Invoice.Status.AUTHORIZED:
+            raise FiscalError('El cupon ya esta facturado')
+        if invoice and invoice.status not in GETNET_RETRYABLE_INVOICE_STATUSES:
+            raise FiscalError('El cupon tiene una factura anulada; revisala antes de volver a facturar')
+        if invoice:
+            meta = dict(invoice.meta or {})
+            meta['vat_rate'] = str(vat_rate)
+            invoice.meta = meta
+            invoice.save(update_fields=['meta', 'updated_at'])
+            return invoice
+
+        invoice = Invoice.objects.create(
+            branch=payment.branch,
+            source=Invoice.Source.GETNET,
+            status=Invoice.Status.DRAFT,
+            point_of_sale=_default_point_of_sale(),
+            voucher_type=int(getattr(settings, 'ARCA_GETNET_VOUCHER_TYPE', 6) or 6),
+            total_amount=payment.amount,
+            net_amount=payment.amount,
+            external_reference=payment.external_id[:128],
+            idempotency_key=f'getnet-invoice:{payment.id}',
+            meta={
+                'created_by': getattr(created_by, 'username', '') if created_by else '',
+                'payment_id': str(payment.id),
+                'vat_rate': str(vat_rate),
+            },
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice,
+            description=_getnet_line_description(payment),
+            quantity=Decimal('1'),
+            unit_price=payment.amount,
+            total=payment.amount,
+        )
+        payment.invoice = invoice
+        payment.save(update_fields=['invoice', 'updated_at'])
+        return invoice
+
+
+def create_getnet_invoices(payment_ids, vat_rate=None, created_by=None):
+    """Emite una factura B a consumidor final por cada cupon. Devuelve el resultado de cada uno."""
+    if not payment_ids:
+        raise FiscalError('Selecciona al menos un cupon para facturar')
+    if len(payment_ids) > 200:
+        raise FiscalError('Se pueden facturar hasta 200 cupones por vez')
+    rate = parse_vat_rate(vat_rate)
+    ordered_ids = list(
+        Payment.objects
+        .filter(pk__in=payment_ids)
+        .order_by('date', 'created_at')
+        .values_list('pk', flat=True)
+    )
+    missing = {str(pk) for pk in payment_ids} - {str(pk) for pk in ordered_ids}
+
+    results = [
+        {'payment_id': payment_id, 'ok': False, 'detail': 'Cupon inexistente', 'invoice': None}
+        for payment_id in sorted(missing)
+    ]
+    for payment_id in ordered_ids:
+        entry = {'payment_id': str(payment_id), 'ok': False, 'detail': '', 'invoice': None}
+        try:
+            invoice = _getnet_invoice_for_payment(payment_id, rate, created_by)
+            invoice = authorize_invoice(invoice)
+            entry['ok'] = True
+            entry['detail'] = 'Factura autorizada'
+        except FiscalError as exc:
+            entry['detail'] = str(exc)
+            invoice = Invoice.objects.filter(payments__pk=payment_id).first()
+            if invoice and invoice.status == Invoice.Status.DRAFT:
+                invoice.status = Invoice.Status.ERROR
+                invoice.error_message = str(exc)
+                invoice.save(update_fields=['status', 'error_message', 'updated_at'])
+        if invoice is not None:
+            invoice.refresh_from_db()
+            entry['invoice'] = invoice_payload(invoice, include_lines=False)
+        results.append(entry)
+    return results
 
 
 def verify_getnet_signature(raw_body, signature):
