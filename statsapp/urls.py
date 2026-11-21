@@ -56,6 +56,7 @@ from .fiscal_views import (
     invoice_credit_note,
     invoice_detail,
     invoices_list,
+    manual_invoices_create,
     payments_list,
 )
 from .salary_views import (
@@ -120,6 +121,7 @@ urlpatterns = [
     path('billing/getnet/invoiceable/', getnet_invoiceable, name='billing_getnet_invoiceable'),
     path('billing/getnet/invoices/', getnet_invoices_create, name='billing_getnet_invoices'),
     path('billing/arca/status/', arca_status_view, name='billing_arca_status'),
+    path('billing/manual-invoices/', manual_invoices_create, name='billing_manual_invoices'),
     path('salaries/summary/', salaries_dashboard, name='salaries_summary'),
     path('salaries/monthly/', salaries_monthly, name='salaries_monthly'),
     path('salaries/aguinaldo/', salaries_aguinaldo, name='salaries_aguinaldo'),

@@ -17,6 +17,7 @@ from .fiscal_services import (
     create_account_invoice,
     create_credit_note,
     create_getnet_invoices,
+    create_manual_invoices,
     create_manual_payment,
     getnet_candidate_payload,
     getnet_invoiceable_payments,
@@ -160,6 +161,35 @@ def getnet_invoices_create(request):
     return Response({
         'authorized': authorized,
         'failed': len(results) - authorized,
+        'results': results,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def manual_invoices_create(request):
+    items = request.data.get('items') or []
+    if not isinstance(items, list):
+        return Response({'detail': 'items debe ser una lista'}, status=status.HTTP_400_BAD_REQUEST)
+    branch_value = request.data.get('branch_id')
+    branch_id = _positive_int(branch_value)
+    if branch_value not in (None, '') and not branch_id:
+        return Response({'detail': 'Sucursal invalida'}, status=status.HTTP_400_BAD_REQUEST)
+    branch = get_object_or_404(Branch, pk=branch_id, active=True) if branch_id else None
+    try:
+        results = create_manual_invoices(
+            items,
+            vat_rate=request.data.get('vat_rate'),
+            branch=branch,
+            created_by=request.user,
+        )
+    except FiscalError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    authorized = [item for item in results if item['ok']]
+    return Response({
+        'authorized': len(authorized),
+        'failed': len(results) - len(authorized),
+        'authorized_total': sum(item['amount'] for item in authorized),
         'results': results,
     })
 

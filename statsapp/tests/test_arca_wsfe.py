@@ -559,3 +559,110 @@ class CreditNoteApiTests(TestCase):
         on_note = self.api.post(f'/api/billing/invoices/{first.data["id"]}/credit-note/', {}, format='json')
         self.assertEqual(on_note.status_code, 400)
         self.assertEqual(Invoice.objects.filter(voucher_type=8).count(), 1)
+
+
+@override_settings(ARCA_PROVIDER='mock', ARCA_DEFAULT_POINT_OF_SALE=4, ARCA_GETNET_VOUCHER_TYPE=6)
+class ManualInvoiceApiTests(TestCase):
+    def setUp(self):
+        user = get_user_model().objects.create_user(
+            username='admin', password='admin123', is_staff=True, is_superuser=True,
+        )
+        self.api = APIClient()
+        self.api.force_authenticate(user)
+        today = timezone.localdate()
+        self.params = {'year': today.year, 'month': today.month}
+
+    def test_issues_one_factura_b_per_amount(self):
+        response = self.api.post('/api/billing/manual-invoices/', {
+            'items': [
+                {'amount': '150000', 'description': 'Venta mostrador efectivo'},
+                {'amount': '1.500,50'},
+                {'amount': 2500},
+            ],
+            'vat_rate': '21',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['authorized'], 3)
+        self.assertEqual(response.data['failed'], 0)
+        self.assertEqual(response.data['authorized_total'], 154000.5)
+        invoices = Invoice.objects.filter(source=Invoice.Source.MANUAL).order_by('created_at')
+        self.assertEqual(
+            [invoice.total_amount for invoice in invoices],
+            [Decimal('150000.00'), Decimal('1500.50'), Decimal('2500.00')],
+        )
+        for invoice in invoices:
+            self.assertEqual(invoice.status, Invoice.Status.AUTHORIZED)
+            self.assertEqual(invoice.voucher_type, 6)
+            self.assertEqual(invoice.point_of_sale, 4)
+            self.assertEqual(invoice.meta['vat_rate'], '21')
+        self.assertEqual(invoices[0].lines.get().description, 'Venta mostrador efectivo')
+        self.assertEqual(invoices[1].lines.get().description, 'Venta mostrador')
+        self.assertEqual(len({invoice.voucher_number for invoice in invoices}), 3)
+
+        summary = self.api.get('/api/billing/summary/', self.params).data['invoices']
+        self.assertEqual(summary['authorized_total'], 154000.5)
+
+        listed = self.api.get('/api/billing/invoices/', {**self.params, 'source': 'manual'})
+        self.assertEqual(len(listed.data), 3)
+
+    def test_rejects_invalid_amounts_without_issuing_anything(self):
+        for items in ([], [{'amount': '0'}], [{'amount': '-5'}], [{'amount': 'abc'}], [{'amount': '100'}, {'amount': ''}]):
+            response = self.api.post('/api/billing/manual-invoices/', {'items': items}, format='json')
+            self.assertEqual(response.status_code, 400, items)
+        self.assertFalse(Invoice.objects.exists())
+
+    def test_rejects_unsupported_vat_and_too_many_rows(self):
+        bad_vat = self.api.post(
+            '/api/billing/manual-invoices/', {'items': [{'amount': '100'}], 'vat_rate': '27'}, format='json',
+        )
+        self.assertEqual(bad_vat.status_code, 400)
+        too_many = self.api.post(
+            '/api/billing/manual-invoices/', {'items': [{'amount': '1'}] * 101}, format='json',
+        )
+        self.assertEqual(too_many.status_code, 400)
+        self.assertFalse(Invoice.objects.exists())
+
+    def test_manual_invoice_can_be_cancelled(self):
+        issued = self.api.post('/api/billing/manual-invoices/', {'items': [{'amount': '9000'}]}, format='json')
+        invoice_id = issued.data['results'][0]['invoice']['id']
+
+        response = self.api.post(f'/api/billing/invoices/{invoice_id}/credit-note/', {}, format='json')
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Invoice.objects.get(pk=invoice_id).status, Invoice.Status.CANCELLED)
+
+
+@override_settings(**WSFE_SETTINGS)
+class ManualInvoiceWsfeTests(TestCase):
+    def setUp(self):
+        ArcaAccessTicket.objects.create(
+            environment='homologacion',
+            service='wsfe',
+            cuit=CUIT,
+            token='TOKEN',
+            sign='SIGN',
+            generated_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(hours=10),
+        )
+
+    def test_failed_row_does_not_stop_the_rest(self):
+        from statsapp.fiscal_services import create_manual_invoices
+
+        transport = FakeTransport({
+            'FECompUltimoAutorizado': [last_authorized_response(7), last_authorized_response(7)],
+            'FECAESolicitar': [
+                cae_response('R', errors=[(10048, 'Importe invalido')]),
+                cae_response('A', cae='76555666777888'),
+            ],
+        })
+        arca_services.set_transport_factory(lambda: transport)
+        self.addCleanup(arca_services.set_transport_factory, None)
+
+        results = create_manual_invoices([{'amount': '1000'}, {'amount': '2000'}], vat_rate='10.5')
+
+        self.assertEqual([item['ok'] for item in results], [False, True])
+        self.assertIn('10048', results[0]['detail'])
+        self.assertEqual(results[0]['invoice']['status'], 'rejected')
+        self.assertEqual(results[1]['invoice']['voucher_number'], 8)
+        self.assertEqual(results[1]['invoice']['cae'], '76555666777888')
