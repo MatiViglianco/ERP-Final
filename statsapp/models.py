@@ -577,6 +577,14 @@ class Invoice(models.Model):
     cae = models.CharField(max_length=32, blank=True)
     cae_due_date = models.DateField(null=True, blank=True)
     external_reference = models.CharField(max_length=128, blank=True)
+    # En una nota de credito: la factura que anula.
+    cancels = models.OneToOneField(
+        'self',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='credit_note',
+    )
     idempotency_key = models.CharField(max_length=128, unique=True)
     provider_result = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)

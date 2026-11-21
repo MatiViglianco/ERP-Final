@@ -378,3 +378,184 @@ class GetnetInvoicingApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['provider'], 'mock')
         self.assertFalse(response.data['ready'])
+
+
+@override_settings(**WSFE_SETTINGS)
+class WsfeCreditNoteTests(TestCase):
+    def setUp(self):
+        from statsapp.models import InvoiceLine
+
+        ArcaAccessTicket.objects.create(
+            environment='homologacion',
+            service='wsfe',
+            cuit=CUIT,
+            token='TOKEN',
+            sign='SIGN',
+            generated_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(hours=10),
+        )
+        self.issue_date = timezone.localdate() - timedelta(days=2)
+        self.invoice = Invoice.objects.create(
+            source=Invoice.Source.GETNET,
+            status=Invoice.Status.AUTHORIZED,
+            issue_date=self.issue_date,
+            point_of_sale=4,
+            voucher_type=6,
+            voucher_number=42,
+            cae='76000000000001',
+            total_amount=Decimal('24363.00'),
+            net_amount=Decimal('22047.96'),
+            vat_amount=Decimal('2315.04'),
+            idempotency_key='authorized-invoice-42',
+            meta={'vat_rate': '10.5'},
+        )
+        InvoiceLine.objects.create(
+            invoice=self.invoice, description='Venta', unit_price=Decimal('24363.00'), total=Decimal('24363.00'),
+        )
+        self.payment = Payment.objects.create(
+            source=Payment.Source.GETNET,
+            status=Payment.Status.RECONCILED,
+            date=self.issue_date,
+            amount=Decimal('24363.00'),
+            external_id='getnet-nc-1',
+            idempotency_key='getnet:getnet-nc-1',
+            invoice=self.invoice,
+        )
+
+    def cancel(self, transport, reason='Error de carga'):
+        from statsapp.fiscal_services import create_credit_note
+
+        arca_services.set_transport_factory(lambda: transport)
+        self.addCleanup(arca_services.set_transport_factory, None)
+        return create_credit_note(self.invoice.pk, reason=reason)
+
+    def test_credit_note_references_original_and_cancels_it(self):
+        transport = FakeTransport({
+            'FECompUltimoAutorizado': [last_authorized_response(0)],
+            'FECAESolicitar': [cae_response('A', cae='76222333444555')],
+        })
+
+        credit_note = self.cancel(transport)
+
+        self.assertEqual(credit_note.status, Invoice.Status.AUTHORIZED)
+        self.assertEqual(credit_note.voucher_type, 8)
+        self.assertEqual(credit_note.voucher_number, 1)
+        self.assertEqual(credit_note.cancels, self.invoice)
+        self.assertEqual(credit_note.total_amount, Decimal('24363.00'))
+        body = transport.body('FECAESolicitar')
+        self.assertIn('<ar:CbteTipo>8</ar:CbteTipo>', body)
+        self.assertIn(
+            '<ar:CbtesAsoc><ar:CbteAsoc><ar:Tipo>6</ar:Tipo><ar:PtoVta>4</ar:PtoVta><ar:Nro>42</ar:Nro>'
+            f'<ar:Cuit>{CUIT}</ar:Cuit><ar:CbteFch>{self.issue_date.strftime("%Y%m%d")}</ar:CbteFch>'
+            '</ar:CbteAsoc></ar:CbtesAsoc>',
+            body,
+        )
+        self.assertIn('<ar:CbteTipo>8</ar:CbteTipo>', transport.body('FECompUltimoAutorizado'))
+
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, Invoice.Status.CANCELLED)
+        self.assertEqual(self.invoice.meta['cancel_reason'], 'Error de carga')
+        self.assertIn('Nota de credito B 00004-00000001', self.invoice.meta['cancelled_voucher'])
+        self.payment.refresh_from_db()
+        self.assertIsNone(self.payment.invoice)
+
+    def test_rejected_credit_note_keeps_invoice_and_retry_reuses_it(self):
+        rejected = FakeTransport({
+            'FECompUltimoAutorizado': [last_authorized_response(0)],
+            'FECAESolicitar': [cae_response('R', errors=[(10040, 'Comprobante asociado invalido')])],
+        })
+        with self.assertRaises(Exception):
+            self.cancel(rejected)
+
+        self.invoice.refresh_from_db()
+        self.assertEqual(self.invoice.status, Invoice.Status.AUTHORIZED)
+        credit_note = Invoice.objects.get(cancels=self.invoice)
+        self.assertEqual(credit_note.status, Invoice.Status.REJECTED)
+        self.payment.refresh_from_db()
+        self.assertEqual(self.payment.invoice, self.invoice)
+
+        retry = FakeTransport({
+            'FECompUltimoAutorizado': [last_authorized_response(0)],
+            'FECAESolicitar': [cae_response('A')],
+        })
+        again = self.cancel(retry)
+
+        self.assertEqual(again.pk, credit_note.pk)
+        self.assertEqual(again.status, Invoice.Status.AUTHORIZED)
+        self.assertEqual(Invoice.objects.filter(cancels=self.invoice).count(), 1)
+
+    def test_cancelled_invoice_cannot_be_reauthorized(self):
+        from statsapp.fiscal_services import FiscalError, authorize_invoice
+
+        self.invoice.status = Invoice.Status.CANCELLED
+        self.invoice.save(update_fields=['status'])
+        with self.assertRaises(FiscalError):
+            authorize_invoice(self.invoice)
+
+
+@override_settings(ARCA_PROVIDER='mock', ARCA_DEFAULT_POINT_OF_SALE=4, ARCA_GETNET_VOUCHER_TYPE=6)
+class CreditNoteApiTests(TestCase):
+    def setUp(self):
+        user = get_user_model().objects.create_user(
+            username='admin', password='admin123', is_staff=True, is_superuser=True,
+        )
+        self.api = APIClient()
+        self.api.force_authenticate(user)
+        today = timezone.localdate()
+        self.params = {'year': today.year, 'month': today.month}
+        self.payment = Payment.objects.create(
+            source=Payment.Source.GETNET,
+            status=Payment.Status.RECONCILED,
+            date=today,
+            amount=Decimal('1500.00'),
+            external_id='getnet-api-nc',
+            idempotency_key='getnet:getnet-api-nc',
+        )
+
+    def invoice_coupon(self):
+        response = self.api.post(
+            '/api/billing/getnet/invoices/', {'payment_ids': [str(self.payment.id)]}, format='json',
+        )
+        self.assertEqual(response.data['authorized'], 1)
+        self.payment.refresh_from_db()
+        return self.payment.invoice
+
+    def test_cancel_frees_coupon_and_allows_reinvoicing(self):
+        invoice = self.invoice_coupon()
+
+        response = self.api.post(
+            f'/api/billing/invoices/{invoice.id}/credit-note/', {'reason': 'Duplicada'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['is_credit_note'])
+        self.assertEqual(response.data['voucher_type'], 8)
+        self.assertEqual(response.data['cancels_id'], str(invoice.id))
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, Invoice.Status.CANCELLED)
+
+        listed = self.api.get('/api/billing/getnet/invoiceable/', self.params)
+        self.assertEqual([item['external_id'] for item in listed.data], ['getnet-api-nc'])
+
+        reinvoiced = self.invoice_coupon()
+        self.assertNotEqual(reinvoiced.pk, invoice.pk)
+        self.assertEqual(reinvoiced.status, Invoice.Status.AUTHORIZED)
+
+        summary = self.api.get('/api/billing/summary/', self.params).data['invoices']
+        self.assertEqual(summary['authorized_total'], 1500.0)
+        self.assertEqual(summary['authorized_count'], 1)
+        self.assertEqual(summary['cancelled_count'], 1)
+        self.assertEqual(summary['credit_notes_count'], 1)
+
+    def test_cannot_cancel_twice_or_cancel_a_credit_note(self):
+        invoice = self.invoice_coupon()
+        first = self.api.post(f'/api/billing/invoices/{invoice.id}/credit-note/', {}, format='json')
+        self.assertEqual(first.status_code, 201)
+
+        twice = self.api.post(f'/api/billing/invoices/{invoice.id}/credit-note/', {}, format='json')
+        self.assertEqual(twice.status_code, 400)
+        self.assertIn('ya esta anulada', twice.data['detail'])
+
+        on_note = self.api.post(f'/api/billing/invoices/{first.data["id"]}/credit-note/', {}, format='json')
+        self.assertEqual(on_note.status_code, 400)
+        self.assertEqual(Invoice.objects.filter(voucher_type=8).count(), 1)

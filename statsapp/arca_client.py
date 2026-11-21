@@ -41,6 +41,10 @@ VAT_RATE_IDS = {
     Decimal('27'): 6,
 }
 
+# Tipo de nota de credito que anula cada tipo de factura (A, B, C).
+CREDIT_NOTE_TYPES = {1: 3, 6: 8, 11: 13}
+CREDIT_NOTE_VOUCHER_TYPES = set(CREDIT_NOTE_TYPES.values())
+
 # Error de WSFE cuando el numero enviado no es el siguiente al ultimo autorizado.
 WSFE_SEQUENCE_ERROR_CODES = {10016}
 
@@ -361,10 +365,28 @@ class WsfeClient:
         }
 
     def request_cae(self, *, point_of_sale, voucher_type, number, issue_date, total, net, vat, vat_rate,
-                    doc_type=99, doc_number=0, receiver_vat_condition=5, concept=1):
+                    doc_type=99, doc_number=0, receiver_vat_condition=5, concept=1, associated=None):
+        """Solicita CAE para un comprobante.
+
+        ``associated`` (obligatorio para notas de credito/debito) es una lista de
+        dicts con voucher_type, point_of_sale, number, cuit e issue_date del
+        comprobante que se anula o ajusta.
+        """
         vat_id = VAT_RATE_IDS.get(Decimal(str(vat_rate)))
         if vat_id is None:
             raise ArcaConfigurationError(f'Alicuota de IVA no soportada: {vat_rate}')
+        associated_xml = ''
+        if associated:
+            associated_xml = '<ar:CbtesAsoc>' + ''.join(
+                '<ar:CbteAsoc>'
+                f'<ar:Tipo>{int(item["voucher_type"])}</ar:Tipo>'
+                f'<ar:PtoVta>{int(item["point_of_sale"])}</ar:PtoVta>'
+                f'<ar:Nro>{int(item["number"])}</ar:Nro>'
+                f'<ar:Cuit>{escape(str(item["cuit"]))}</ar:Cuit>'
+                f'<ar:CbteFch>{item["issue_date"].strftime("%Y%m%d")}</ar:CbteFch>'
+                '</ar:CbteAsoc>'
+                for item in associated
+            ) + '</ar:CbtesAsoc>'
         detail = (
             '<ar:FECAEDetRequest>'
             f'<ar:Concepto>{int(concept)}</ar:Concepto>'
@@ -382,6 +404,7 @@ class WsfeClient:
             '<ar:MonId>PES</ar:MonId>'
             '<ar:MonCotiz>1</ar:MonCotiz>'
             f'<ar:CondicionIVAReceptorId>{int(receiver_vat_condition)}</ar:CondicionIVAReceptorId>'
+            f'{associated_xml}'
             '<ar:Iva><ar:AlicIva>'
             f'<ar:Id>{vat_id}</ar:Id>'
             f'<ar:BaseImp>{_money(net)}</ar:BaseImp>'
