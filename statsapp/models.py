@@ -758,3 +758,49 @@ class ExternalEvent(models.Model):
     def __str__(self):
         return f"{self.provider}:{self.event_id}"
 
+
+class ArcaAccessTicket(models.Model):
+    """Ticket de acceso WSAA. ARCA rechaza pedir otro mientras el vigente no venza."""
+
+    environment = models.CharField(max_length=16)
+    service = models.CharField(max_length=32)
+    cuit = models.CharField(max_length=11)
+    token = models.TextField()
+    sign = models.TextField()
+    generated_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['environment', 'service', 'cuit'],
+                name='unique_arca_access_ticket',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.environment}:{self.service}:{self.cuit} hasta {self.expires_at}"
+
+
+class ArcaSequence(models.Model):
+    """Fila que se bloquea para emitir de a un comprobante por punto de venta y tipo."""
+
+    environment = models.CharField(max_length=16)
+    cuit = models.CharField(max_length=11)
+    point_of_sale = models.PositiveIntegerField()
+    voucher_type = models.PositiveIntegerField()
+    last_number = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['environment', 'cuit', 'point_of_sale', 'voucher_type'],
+                name='unique_arca_sequence',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.environment} {self.point_of_sale:05d}-{self.voucher_type} #{self.last_number}"
+
