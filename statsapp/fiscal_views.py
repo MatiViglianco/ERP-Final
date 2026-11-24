@@ -87,7 +87,7 @@ def invoices_list(request):
     source_filter = (request.query_params.get('source') or '').strip()
     if source_filter:
         qs = qs.filter(source=source_filter)
-    return Response([invoice_payload(invoice, include_lines=False) for invoice in qs[:500]])
+    return Response([invoice_payload(invoice, include_lines=False) for invoice in qs[:3000]])
 
 
 @api_view(['GET'])
@@ -140,7 +140,7 @@ def getnet_invoiceable(request):
         terminal_id=_positive_int(request.query_params.get('terminal_id')),
         branch_id=_positive_int(request.query_params.get('branch_id')),
     )
-    return Response([getnet_candidate_payload(payment) for payment in payments[:1000]])
+    return Response([getnet_candidate_payload(payment) for payment in payments[:3000]])
 
 
 @api_view(['POST'])
@@ -276,7 +276,7 @@ def payments_list(request):
     terminal_id = _positive_int(request.query_params.get('terminal_id'))
     if terminal_id:
         qs = qs.filter(terminal_id=terminal_id)
-    return Response([payment_payload(payment) for payment in qs[:500]])
+    return Response([payment_payload(payment) for payment in qs[:3000]])
 
 
 @api_view(['POST'])

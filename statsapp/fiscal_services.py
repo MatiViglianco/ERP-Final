@@ -299,6 +299,12 @@ def authorize_invoice(invoice):
         if locked.status == Invoice.Status.AUTHORIZED:
             return locked
         locked.voucher_number = _next_mock_voucher_number(locked)
+        vat_rate = (locked.meta or {}).get('vat_rate')
+        if vat_rate:
+            # Mismo desglose que WSFE, para que el modo simulado muestre neto e IVA reales.
+            from .arca_services import split_vat_included
+
+            locked.net_amount, locked.vat_amount = split_vat_included(locked.total_amount, vat_rate)
         locked.cae = f"MOCK{locked.issue_date.strftime('%Y%m%d')}{locked.voucher_number:08d}"[:32]
         locked.cae_due_date = locked.issue_date + timedelta(days=10)
         locked.status = Invoice.Status.AUTHORIZED
@@ -315,6 +321,8 @@ def authorize_invoice(invoice):
             'status',
             'error_message',
             'provider_result',
+            'net_amount',
+            'vat_amount',
             'updated_at',
         ])
         return locked

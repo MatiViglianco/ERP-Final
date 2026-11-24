@@ -606,6 +606,16 @@ class ManualInvoiceApiTests(TestCase):
         listed = self.api.get('/api/billing/invoices/', {**self.params, 'source': 'manual'})
         self.assertEqual(len(listed.data), 3)
 
+    def test_mock_provider_splits_net_and_vat_like_wsfe(self):
+        response = self.api.post(
+            '/api/billing/manual-invoices/', {'items': [{'amount': '1105'}], 'vat_rate': '10.5'}, format='json',
+        )
+
+        invoice = response.data['results'][0]['invoice']
+        self.assertEqual(invoice['net_amount'], 1000.0)
+        self.assertEqual(invoice['vat_amount'], 105.0)
+        self.assertEqual(invoice['total_amount'], 1105.0)
+
     def test_rejects_invalid_amounts_without_issuing_anything(self):
         for items in ([], [{'amount': '0'}], [{'amount': '-5'}], [{'amount': 'abc'}], [{'amount': '100'}, {'amount': ''}]):
             response = self.api.post('/api/billing/manual-invoices/', {'items': items}, format='json')

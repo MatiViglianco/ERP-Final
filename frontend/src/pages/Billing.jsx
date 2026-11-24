@@ -1,157 +1,84 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
-  Autocomplete,
   Box,
-  Button,
   Card,
-  CardContent,
-  Checkbox,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogContentText,
-  DialogTitle,
-  Divider,
   FormControl,
+  IconButton,
   InputLabel,
   LinearProgress,
   MenuItem,
   Select,
+  Snackbar,
   Stack,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  TextField,
+  Tab,
+  Tabs,
+  Tooltip,
   Typography,
 } from '@mui/material'
-import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
-import PaymentsIcon from '@mui/icons-material/Payments'
-import AccountBalanceIcon from '@mui/icons-material/AccountBalance'
-import SyncAltIcon from '@mui/icons-material/SyncAlt'
+import RefreshIcon from '@mui/icons-material/Refresh'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
 import useBranches from '../hooks/useBranches.js'
+import { MONTHS, arcaModeColor, arcaModeLabel } from './billing/format'
+import SummaryCards from './billing/SummaryCards.jsx'
+import InvoicesPanel from './billing/InvoicesPanel.jsx'
+import CouponsPanel from './billing/CouponsPanel.jsx'
+import ManualInvoicesPanel from './billing/ManualInvoicesPanel.jsx'
+import AccountInvoicePanel from './billing/AccountInvoicePanel.jsx'
+import PaymentsPanel from './billing/PaymentsPanel.jsx'
+import TerminalsPanel from './billing/TerminalsPanel.jsx'
+import InvoiceDetailDrawer from './billing/InvoiceDetailDrawer.jsx'
 
 const API_BILLING_SUMMARY = `${API_BASE}/billing/summary/`
 const API_BILLING_INVOICES = `${API_BASE}/billing/invoices/`
 const API_BILLING_PAYMENTS = `${API_BASE}/billing/payments/`
 const API_GETNET_TERMINALS = `${API_BASE}/billing/getnet/terminals/`
-const API_GETNET_TERMINAL = (id) => `${API_GETNET_TERMINALS}${id}/`
-const API_ACCOUNTS = `${API_BASE}/accounts/clients/`
-const API_ACCOUNT_PREVIEW = (id) => `${API_BASE}/billing/accounts/${id}/preview/`
-const API_ACCOUNT_INVOICE = (id) => `${API_BASE}/billing/accounts/${id}/invoices/`
 const API_GETNET_INVOICEABLE = `${API_BASE}/billing/getnet/invoiceable/`
-const API_GETNET_INVOICES = `${API_BASE}/billing/getnet/invoices/`
 const API_ARCA_STATUS = `${API_BASE}/billing/arca/status/`
 
-const VAT_RATES = [
-  { value: '10.5', label: 'IVA 10,5%' },
-  { value: '21', label: 'IVA 21%' },
-]
+const TABS = ['comprobantes', 'cupones', 'manuales', 'cuenta', 'cobros', 'terminales']
+const TAB_STORAGE_KEY = 'billing.tab'
 
-const VOUCHER_LETTERS = { 1: 'A', 3: 'NC A', 6: 'B', 8: 'NC B', 11: 'C', 13: 'NC C' }
-const API_INVOICE_CREDIT_NOTE = (id) => `${API_BASE}/billing/invoices/${id}/credit-note/`
-const API_INVOICE_AUTHORIZE = (id) => `${API_BASE}/billing/invoices/${id}/authorize/`
-const API_MANUAL_INVOICES = `${API_BASE}/billing/manual-invoices/`
-
-const EMPTY_MANUAL_ROW = { amount: '', description: '' }
-
-// Acepta "1500", "1500.50", "1.500,50" o "1500,50".
-function parseAmount(value) {
-  let text = String(value || '').trim().replace(/\s|\$/g, '')
-  if (text.includes(',') && text.includes('.') && text.lastIndexOf(',') > text.lastIndexOf('.')) {
-    text = text.replace(/\./g, '')
+function readStoredTab() {
+  try {
+    const value = window.localStorage.getItem(TAB_STORAGE_KEY)
+    return TABS.includes(value) ? value : 'comprobantes'
+  } catch {
+    return 'comprobantes'
   }
-  const number = Number(text.replace(',', '.'))
-  return Number.isFinite(number) ? number : NaN
 }
 
-// Reparte un total en N importes; el ultimo absorbe el redondeo.
-function splitAmount(total, count) {
-  const cents = Math.round(total * 100)
-  const base = Math.floor(cents / count)
-  return Array.from({ length: count }, (_, index) => (
-    (index === count - 1 ? cents - base * (count - 1) : base) / 100
-  ))
+function storeTab(value) {
+  try {
+    window.localStorage.setItem(TAB_STORAGE_KEY, value)
+  } catch {
+    // Sin almacenamiento disponible: solo no se recuerda la pestana.
+  }
 }
 
-function formatVoucher(invoice) {
-  if (!invoice?.voucher_number) return '-'
-  const letter = VOUCHER_LETTERS[invoice.voucher_type] || invoice.voucher_type
-  const pos = String(invoice.point_of_sale || 0).padStart(5, '0')
-  const number = String(invoice.voucher_number).padStart(8, '0')
-  return `${letter} ${pos}-${number}`
+async function fetchJson(authFetch, url, fallbackMessage) {
+  const resp = await authFetch(url)
+  const data = await resp.json()
+  if (!resp.ok) throw new Error(data.detail || fallbackMessage)
+  return data
 }
 
-function arcaModeLabel(arca) {
-  if (!arca) return 'Consultando ARCA...'
-  if (arca.provider !== 'wsfe') return 'Simulado (sin validez fiscal)'
-  return arca.environment === 'produccion' ? 'ARCA produccion' : 'ARCA homologacion (prueba)'
-}
-
-function arcaModeColor(arca) {
-  if (!arca || arca.provider !== 'wsfe') return 'default'
-  if (!arca.ready) return 'error'
-  return arca.environment === 'produccion' ? 'success' : 'warning'
-}
-
-const MONTHS = [
-  { value: '1', label: 'Enero' },
-  { value: '2', label: 'Febrero' },
-  { value: '3', label: 'Marzo' },
-  { value: '4', label: 'Abril' },
-  { value: '5', label: 'Mayo' },
-  { value: '6', label: 'Junio' },
-  { value: '7', label: 'Julio' },
-  { value: '8', label: 'Agosto' },
-  { value: '9', label: 'Septiembre' },
-  { value: '10', label: 'Octubre' },
-  { value: '11', label: 'Noviembre' },
-  { value: '12', label: 'Diciembre' },
-]
-
-const PAYMENT_SOURCES = [
-  { value: 'getnet', label: 'Getnet' },
-  { value: 'santander', label: 'Santander' },
-  { value: 'bancon', label: 'Bancor' },
-  { value: 'transfer', label: 'Transferencia' },
-  { value: 'cash', label: 'Efectivo' },
-  { value: 'manual', label: 'Manual' },
-]
-
-function formatCurrency(value) {
-  return `$ ${Number(value || 0).toLocaleString('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-}
-
-function currentIsoDate() {
-  return new Date().toISOString().split('T')[0]
-}
-
-function statusColor(status) {
-  if (status === 'authorized' || status === 'approved' || status === 'reconciled') return 'success'
-  if (status === 'draft' || status === 'pending') return 'warning'
-  if (status === 'needs_review') return 'info'
-  return 'error'
-}
-
-function SummaryCard({ icon, label, value, detail }) {
+function TabLabel({ label, count, color = 'primary', hint }) {
   return (
-    <Card sx={{ height: '100%', border: '1px solid rgba(255,255,255,0.08)' }}>
-      <CardContent>
-        <Stack direction="row" spacing={1.5} alignItems="center">
-          {icon}
-          <Box>
-            <Typography variant="body2" color="text.secondary">{label}</Typography>
-            <Typography variant="h5" fontWeight={700}>{formatCurrency(value)}</Typography>
-            {detail ? <Typography variant="caption" color="text.secondary">{detail}</Typography> : null}
-          </Box>
-        </Stack>
-      </CardContent>
-    </Card>
+    <Stack direction="row" spacing={1} alignItems="center">
+      <span>{label}</span>
+      {count > 0 && (
+        <Chip
+          size="small"
+          color={color}
+          label={count > 999 ? '999+' : count}
+          aria-label={hint ? `${count} ${hint}` : undefined}
+          sx={{ height: 20, fontSize: 12, fontWeight: 700, '& .MuiChip-label': { px: 0.75 } }}
+        />
+      )}
+    </Stack>
   )
 }
 
@@ -161,98 +88,62 @@ export default function BillingPage() {
   const now = new Date()
   const [year, setYear] = useState(String(now.getFullYear()))
   const [month, setMonth] = useState(String(now.getMonth() + 1))
+  const [terminalId, setTerminalId] = useState('')
+  const [tab, setTab] = useState(readStoredTab)
   const [summary, setSummary] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [payments, setPayments] = useState([])
   const [terminals, setTerminals] = useState([])
-  const [selectedTerminalId, setSelectedTerminalId] = useState('')
-  const [invoiceBranchId, setInvoiceBranchId] = useState('')
-  const [clients, setClients] = useState([])
-  const [selectedClient, setSelectedClient] = useState(null)
-  const [preview, setPreview] = useState(null)
-  const [selectedTx, setSelectedTx] = useState(new Set())
-  const [loading, setLoading] = useState(false)
-  const [clientLoading, setClientLoading] = useState(false)
-  const [actionLoading, setActionLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
-  const [paymentForm, setPaymentForm] = useState({
-    source: 'getnet',
-    amount: '',
-    date: currentIsoDate(),
-    external_id: '',
-  })
+  const [candidates, setCandidates] = useState([])
   const [arcaStatus, setArcaStatus] = useState(null)
-  const [getnetCandidates, setGetnetCandidates] = useState([])
-  const [selectedPayments, setSelectedPayments] = useState(new Set())
-  const [vatRate, setVatRate] = useState('10.5')
-  const [getnetResults, setGetnetResults] = useState(null)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [cancelTarget, setCancelTarget] = useState(null)
-  const [cancelReason, setCancelReason] = useState('')
-  const [manualRows, setManualRows] = useState([{ ...EMPTY_MANUAL_ROW }])
-  const [manualVatRate, setManualVatRate] = useState('10.5')
-  const [splitTotal, setSplitTotal] = useState('')
-  const [splitCount, setSplitCount] = useState('10')
-  const [manualConfirmOpen, setManualConfirmOpen] = useState(false)
-  const [manualResults, setManualResults] = useState(null)
+  const [branchId, setBranchId] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [toast, setToast] = useState(null)
+  const [detailInvoiceId, setDetailInvoiceId] = useState(null)
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({ year, month })
-    if (selectedTerminalId) params.set('terminal_id', selectedTerminalId)
+    if (terminalId) params.set('terminal_id', terminalId)
     return params.toString()
-  }, [year, month, selectedTerminalId])
+  }, [year, month, terminalId])
 
-  const selectedTotal = useMemo(() => {
-    const txs = preview?.transactions || []
-    return txs
-      .filter((tx) => selectedTx.has(tx.id))
-      .reduce((acc, tx) => acc + Number(tx.remaining || 0), 0)
-  }, [preview, selectedTx])
+  const periodLabel = `${year}-${String(month).padStart(2, '0')}`
 
-  const selectedPaymentsTotal = useMemo(() => getnetCandidates
-    .filter((payment) => selectedPayments.has(payment.id))
-    .reduce((acc, payment) => acc + Number(payment.amount || 0), 0), [getnetCandidates, selectedPayments])
+  const notify = useCallback((severity, message) => {
+    if (severity === 'error') {
+      setError(message)
+    } else {
+      setError('')
+      setToast({ severity, message })
+    }
+  }, [])
 
-  const manualAmounts = useMemo(() => manualRows.map((row) => parseAmount(row.amount)), [manualRows])
-  const manualFilledRows = useMemo(
-    () => manualRows.filter((row) => String(row.amount || '').trim() !== ''),
-    [manualRows],
-  )
-  const manualInvalid = useMemo(
-    () => manualRows.some((row, index) => String(row.amount || '').trim() !== '' && !(manualAmounts[index] > 0)),
-    [manualRows, manualAmounts],
-  )
-  const manualTotal = useMemo(
-    () => manualAmounts.reduce((acc, value) => acc + (value > 0 ? value : 0), 0),
-    [manualAmounts],
-  )
+  const loadArcaStatus = useCallback(async () => {
+    try {
+      setArcaStatus(await fetchJson(authFetch, API_ARCA_STATUS, 'No se pudo consultar ARCA'))
+    } catch (err) {
+      setArcaStatus({ provider: 'wsfe', ready: false, error: err.message })
+    }
+  }, [authFetch])
 
-  const totalCollected = useMemo(() => {
-    const collections = summary?.collections || {}
-    return Object.values(collections).reduce((acc, value) => acc + Number(value || 0), 0)
-  }, [summary])
-
-  const loadBilling = useCallback(async () => {
+  const loadAll = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [summaryResp, invoicesResp, paymentsResp] = await Promise.all([
-        authFetch(`${API_BILLING_SUMMARY}?${queryString}`),
-        authFetch(`${API_BILLING_INVOICES}?${queryString}`),
-        authFetch(`${API_BILLING_PAYMENTS}?${queryString}`),
+      const [summaryData, invoicesData, paymentsData, candidatesData, terminalsData] = await Promise.all([
+        fetchJson(authFetch, `${API_BILLING_SUMMARY}?${queryString}`, 'No se pudo cargar el resumen'),
+        fetchJson(authFetch, `${API_BILLING_INVOICES}?${queryString}`, 'No se pudieron cargar los comprobantes'),
+        fetchJson(authFetch, `${API_BILLING_PAYMENTS}?${queryString}`, 'No se pudieron cargar los cobros'),
+        fetchJson(authFetch, `${API_GETNET_INVOICEABLE}?${queryString}`, 'No se pudieron cargar los cupones'),
+        fetchJson(authFetch, API_GETNET_TERMINALS, 'No se pudieron cargar las terminales'),
       ])
-      const [summaryData, invoicesData, paymentsData] = await Promise.all([
-        summaryResp.json(),
-        invoicesResp.json(),
-        paymentsResp.json(),
-      ])
-      if (!summaryResp.ok) throw new Error(summaryData.detail || 'No se pudo cargar el resumen')
-      if (!invoicesResp.ok) throw new Error(invoicesData.detail || 'No se pudieron cargar las facturas')
-      if (!paymentsResp.ok) throw new Error(paymentsData.detail || 'No se pudieron cargar los pagos')
       setSummary(summaryData)
       setInvoices(invoicesData || [])
       setPayments(paymentsData || [])
+      setCandidates(candidatesData || [])
+      setTerminals(terminalsData || [])
     } catch (err) {
       setError(err.message)
     } finally {
@@ -260,1045 +151,164 @@ export default function BillingPage() {
     }
   }, [authFetch, queryString])
 
-  const loadClients = useCallback(async () => {
-    if (branches.length > 1 && !invoiceBranchId) {
-      setClients([])
-      setClientLoading(false)
-      return
-    }
-    setClientLoading(true)
-    try {
-      const params = new URLSearchParams({ limit: '100', ordering: 'debt' })
-      if (invoiceBranchId) params.set('branch_id', invoiceBranchId)
-      const resp = await authFetch(`${API_ACCOUNTS}?${params.toString()}`)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudieron cargar clientes')
-      setClients(data.results || [])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setClientLoading(false)
-    }
-  }, [authFetch, branches.length, invoiceBranchId])
-
-  const loadTerminals = useCallback(async () => {
-    try {
-      const resp = await authFetch(API_GETNET_TERMINALS)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudieron cargar las terminales Getnet')
-      setTerminals(data || [])
-    } catch (err) {
-      setError(err.message)
-    }
-  }, [authFetch])
-
-  const loadArcaStatus = useCallback(async () => {
-    try {
-      const resp = await authFetch(API_ARCA_STATUS)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo consultar ARCA')
-      setArcaStatus(data)
-    } catch (err) {
-      setArcaStatus({ provider: 'wsfe', ready: false, error: err.message })
-    }
-  }, [authFetch])
-
-  const loadGetnetCandidates = useCallback(async () => {
-    try {
-      const resp = await authFetch(`${API_GETNET_INVOICEABLE}?${queryString}`)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudieron cargar los cupones a facturar')
-      setGetnetCandidates(data || [])
-      setSelectedPayments((prev) => new Set((data || []).filter((item) => prev.has(item.id)).map((item) => item.id)))
-    } catch (err) {
-      setError(err.message)
-    }
-  }, [authFetch, queryString])
-
-  const loadPreview = useCallback(async (client) => {
-    setPreview(null)
-    setSelectedTx(new Set())
-    if (!client || (branches.length > 1 && !invoiceBranchId)) return
-    setClientLoading(true)
-    try {
-      const params = new URLSearchParams()
-      if (invoiceBranchId) params.set('branch_id', invoiceBranchId)
-      const query = params.toString()
-      const resp = await authFetch(`${API_ACCOUNT_PREVIEW(client.id)}${query ? `?${query}` : ''}`)
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo cargar la deuda')
-      setPreview(data)
-      setSelectedTx(new Set((data.transactions || []).map((tx) => tx.id)))
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setClientLoading(false)
-    }
-  }, [authFetch, branches.length, invoiceBranchId])
+  const refresh = useCallback(() => Promise.all([loadAll(), loadArcaStatus()]), [loadAll, loadArcaStatus])
 
   useEffect(() => {
-    setInvoiceBranchId((current) => {
-      if (current && branches.some((branch) => String(branch.id) === current)) return current
-      return branches.length === 1 ? String(branches[0].id) : ''
-    })
-  }, [branches])
-
-  useEffect(() => {
-    loadBilling()
-  }, [loadBilling])
-
-  useEffect(() => {
-    loadClients()
-  }, [loadClients])
-
-  useEffect(() => {
-    loadTerminals()
-  }, [loadTerminals])
+    loadAll()
+  }, [loadAll])
 
   useEffect(() => {
     loadArcaStatus()
   }, [loadArcaStatus])
 
   useEffect(() => {
-    loadGetnetCandidates()
-  }, [loadGetnetCandidates])
-
-  const togglePayment = (paymentId) => {
-    setSelectedPayments((prev) => {
-      const next = new Set(prev)
-      if (next.has(paymentId)) next.delete(paymentId)
-      else next.add(paymentId)
-      return next
+    setBranchId((current) => {
+      if (current && branches.some((branch) => String(branch.id) === current)) return current
+      return branches.length === 1 ? String(branches[0].id) : ''
     })
+  }, [branches])
+
+  const changeTab = (_event, value) => {
+    setTab(value)
+    storeTab(value)
   }
 
-  const toggleAllPayments = () => {
-    setSelectedPayments((prev) => (
-      prev.size === getnetCandidates.length
-        ? new Set()
-        : new Set(getnetCandidates.map((payment) => payment.id))
-    ))
-  }
-
-  const openCancelDialog = (invoice) => {
-    setCancelTarget(invoice)
-    setCancelReason('')
-  }
-
-  const cancelInvoice = async () => {
-    const target = cancelTarget
-    setCancelTarget(null)
-    if (!target) return
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_INVOICE_CREDIT_NOTE(target.id), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: cancelReason }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo emitir la nota de credito')
-      setSuccess(`Factura ${formatVoucher(target)} anulada con ${formatVoucher(data)} (CAE ${data.cae})`)
-      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
-    } catch (err) {
-      setError(err.message)
-      await loadBilling()
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  const updateManualRow = (index, field, value) => {
-    setManualRows((prev) => prev.map((row, rowIndex) => (rowIndex === index ? { ...row, [field]: value } : row)))
-  }
-
-  const addManualRow = () => setManualRows((prev) => [...prev, { ...EMPTY_MANUAL_ROW }])
-
-  const removeManualRow = (index) => {
-    setManualRows((prev) => (prev.length === 1 ? [{ ...EMPTY_MANUAL_ROW }] : prev.filter((_, rowIndex) => rowIndex !== index)))
-  }
-
-  const applySplit = () => {
-    const total = parseAmount(splitTotal)
-    const count = Number.parseInt(splitCount, 10)
-    if (!(total > 0) || !(count > 0) || count > 100) {
-      setError('Para repartir, carga un total mayor a cero y entre 1 y 100 facturas')
-      return
-    }
-    setError('')
-    setManualRows(splitAmount(total, count).map((amount) => ({ amount: String(amount), description: '' })))
-  }
-
-  const issueManualInvoices = async () => {
-    setManualConfirmOpen(false)
-    const items = manualRows
-      .map((row, index) => ({ amount: manualAmounts[index], description: row.description }))
-      .filter((item) => item.amount > 0)
-    if (!items.length) return
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    setManualResults(null)
-    try {
-      const resp = await authFetch(API_MANUAL_INVOICES, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          items,
-          vat_rate: manualVatRate,
-          branch_id: invoiceBranchId || null,
-        }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudieron emitir las facturas manuales')
-      setManualResults(data)
-      if (data.authorized) {
-        setSuccess(`${data.authorized} factura(s) manual(es) autorizada(s) por ${formatCurrency(data.authorized_total)}`)
-      }
-      if (data.failed) setError(`${data.failed} factura(s) manual(es) no se pudieron emitir. Revisa el detalle.`)
-      // Quedan solo las filas que fallaron, para reintentarlas.
-      const failedRows = (data.results || [])
-        .filter((item) => !item.ok)
-        .map((item) => ({ amount: String(item.amount), description: items[item.row - 1]?.description || '' }))
-      setManualRows(failedRows.length ? failedRows : [{ ...EMPTY_MANUAL_ROW }])
-      await Promise.all([loadBilling(), loadArcaStatus()])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  const retryInvoice = async (invoice) => {
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_INVOICE_AUTHORIZE(invoice.id), { method: 'POST' })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo autorizar la factura')
-      setSuccess(`Factura ${formatVoucher(data)} autorizada (CAE ${data.cae})`)
-      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
-    } catch (err) {
-      setError(err.message)
-      await loadBilling()
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  const invoiceGetnetPayments = async () => {
-    setConfirmOpen(false)
-    if (selectedPayments.size === 0) return
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    setGetnetResults(null)
-    try {
-      const resp = await authFetch(API_GETNET_INVOICES, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ payment_ids: Array.from(selectedPayments), vat_rate: vatRate }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudieron facturar los cupones')
-      setGetnetResults(data)
-      if (data.authorized) setSuccess(`${data.authorized} factura(s) autorizada(s)`)
-      if (data.failed) setError(`${data.failed} cupon(es) no se pudieron facturar. Revisa el detalle.`)
-      setSelectedPayments(new Set())
-      await Promise.all([loadBilling(), loadGetnetCandidates(), loadArcaStatus()])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    loadPreview(selectedClient)
-  }, [selectedClient, loadPreview])
-
-  const changeInvoiceBranch = (branchId) => {
-    setInvoiceBranchId(branchId)
-    setSelectedClient(null)
-    setPreview(null)
-    setSelectedTx(new Set())
-  }
-
-  const toggleTx = (txId) => {
-    setSelectedTx((prev) => {
-      const next = new Set(prev)
-      if (next.has(txId)) next.delete(txId)
-      else next.add(txId)
-      return next
-    })
-  }
-
-  const updateTerminalBranch = async (terminalId, branchId) => {
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_GETNET_TERMINAL(terminalId), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ branch_id: branchId || null }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo asignar la sucursal')
-      setSuccess(`Terminal ${data.code} asignada a ${data.branch?.name || 'sin sucursal'}`)
-      await Promise.all([loadTerminals(), loadBilling()])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  const createInvoice = async () => {
-    if (!selectedClient || selectedTx.size === 0 || (branches.length > 0 && !invoiceBranchId)) return
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_ACCOUNT_INVOICE(selectedClient.id), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transaction_ids: Array.from(selectedTx),
-          authorize: true,
-          branch_id: invoiceBranchId || null,
-        }),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo crear la factura')
-      setSuccess(`Factura creada por ${formatCurrency(data.total_amount)}. Estado: ${data.status_label}`)
-      await Promise.all([loadBilling(), loadPreview(selectedClient)])
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
-
-  const createPayment = async () => {
-    setActionLoading(true)
-    setError('')
-    setSuccess('')
-    try {
-      const resp = await authFetch(API_BILLING_PAYMENTS, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(paymentForm),
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail || 'No se pudo registrar el cobro')
-      setSuccess(`Cobro registrado: ${formatCurrency(data.amount)} (${data.source_label})`)
-      setPaymentForm((prev) => ({ ...prev, amount: '', external_id: '' }))
-      await loadBilling()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setActionLoading(false)
-    }
-  }
+  const failedInvoices = invoices.filter((invoice) => ['error', 'rejected'].includes(invoice.status)).length
+  const panelProps = { authFetch, notify, busy, setBusy }
 
   return (
     <Stack spacing={3}>
-      <Box>
-        <Typography variant="h4" fontWeight={800}>Facturacion</Typography>
-        <Typography color="text.secondary">
-          Control de facturas ARCA, cobros Getnet, bancos y cuenta corriente.
-        </Typography>
-      </Box>
-
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        <FormControl sx={{ minWidth: 150 }}>
-          <InputLabel>Anio</InputLabel>
-          <Select label="Anio" value={year} onChange={(event) => setYear(event.target.value)}>
-            {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((item) => (
-              <MenuItem key={item} value={String(item)}>{item}</MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <FormControl sx={{ minWidth: 180 }}>
-          <InputLabel>Mes</InputLabel>
-          <Select label="Mes" value={month} onChange={(event) => setMonth(event.target.value)}>
-            {MONTHS.map((item) => (
-              <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <FormControl sx={{ minWidth: 230 }}>
-          <InputLabel>Terminal Getnet</InputLabel>
-          <Select
-            label="Terminal Getnet"
-            value={selectedTerminalId}
-            onChange={(event) => setSelectedTerminalId(event.target.value)}
-          >
-            <MenuItem value="">Todas las terminales</MenuItem>
-            {terminals.map((terminal) => (
-              <MenuItem key={terminal.id} value={String(terminal.id)}>
-                {terminal.code} · {terminal.branch?.name || 'Sin sucursal'}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <Button variant="outlined" startIcon={<SyncAltIcon />} onClick={loadBilling} disabled={loading}>
-          Actualizar
-        </Button>
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ md: 'flex-end' }}>
+        <Box>
+          <Typography variant="h4" component="h1" fontWeight={800}>Facturacion</Typography>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
+            <Chip size="small" color={arcaModeColor(arcaStatus)} label={arcaModeLabel(arcaStatus)} />
+            {arcaStatus?.provider === 'wsfe' && arcaStatus?.ready && (
+              <Typography variant="body2" color="text.secondary">
+                Punto de venta {arcaStatus.point_of_sale} · ultimo comprobante B {arcaStatus.last_voucher_number}
+              </Typography>
+            )}
+          </Stack>
+        </Box>
+        <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+          <FormControl size="small" sx={{ minWidth: 140 }}>
+            <InputLabel id="billing-month">Mes</InputLabel>
+            <Select labelId="billing-month" label="Mes" value={month} onChange={(event) => setMonth(event.target.value)}>
+              {MONTHS.map((item) => <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 100 }}>
+            <InputLabel id="billing-year">Anio</InputLabel>
+            <Select labelId="billing-year" label="Anio" value={year} onChange={(event) => setYear(event.target.value)}>
+              {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((item) => (
+                <MenuItem key={item} value={String(item)}>{item}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 190 }}>
+            <InputLabel id="billing-terminal">Terminal Getnet</InputLabel>
+            <Select labelId="billing-terminal" label="Terminal Getnet" value={terminalId} onChange={(event) => setTerminalId(event.target.value)}>
+              <MenuItem value="">Todas las terminales</MenuItem>
+              {terminals.map((terminal) => (
+                <MenuItem key={terminal.id} value={String(terminal.id)}>
+                  {terminal.code} · {terminal.branch?.name || 'Sin sucursal'}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Tooltip title="Actualizar">
+            <span>
+              <IconButton onClick={refresh} disabled={loading} aria-label="Actualizar datos de facturacion">
+                <RefreshIcon />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </Stack>
       </Stack>
 
-      {loading && <LinearProgress />}
-      {error && <Alert severity="error">{error}</Alert>}
+      {arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready && (
+        <Alert severity="error">No hay conexion con ARCA: {arcaStatus.error || 'revisa la configuracion'}. La emision esta pausada.</Alert>
+      )}
+      {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {branchesError && <Alert severity="warning">{branchesError}</Alert>}
-      {success && <Alert severity="success">{success}</Alert>}
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(0, 1fr))' }, gap: 2 }}>
-        <Box>
-          <SummaryCard
-            icon={<ReceiptLongIcon color="primary" />}
-            label="Facturado ARCA"
-            value={summary?.invoices?.authorized_total}
-            detail={`${summary?.invoices?.authorized_count || 0} comprobantes autorizados`}
-          />
+      <SummaryCards summary={summary} pendingCoupons={candidates} loading={loading && !summary} />
+
+      <Card variant="outlined">
+        <Box sx={{ borderBottom: 1, borderColor: 'divider', px: { xs: 1, md: 2 } }}>
+          <Tabs
+            value={tab}
+            onChange={changeTab}
+            variant="scrollable"
+            scrollButtons="auto"
+            aria-label="Secciones de facturacion"
+            sx={{ '& .MuiTab-root': { textTransform: 'none', fontWeight: 600, fontSize: 15, minHeight: 56 } }}
+          >
+            <Tab value="comprobantes" label={<TabLabel label="Comprobantes" count={failedInvoices} color="error" hint="con error" />} />
+            <Tab value="cupones" label={<TabLabel label="Cupones posnet" count={candidates.length} color="warning" hint="sin facturar" />} />
+            <Tab value="manuales" label="Facturas manuales" />
+            <Tab value="cuenta" label="Cuenta corriente" />
+            <Tab value="cobros" label="Cobros" />
+            <Tab value="terminales" label="Terminales" />
+          </Tabs>
         </Box>
-        <Box>
-          <SummaryCard
-            icon={<PaymentsIcon color="success" />}
-            label="Cobrado total"
-            value={totalCollected}
-            detail={selectedTerminalId
-              ? `Getnet ${formatCurrency(summary?.collections?.getnet || 0)} · Pendiente ${formatCurrency(summary?.getnet?.pending_total || 0)}`
-              : `Getnet ${formatCurrency(summary?.collections?.getnet || 0)} · Acreditado en banco ${formatCurrency(summary?.getnet?.bank_settled_total || 0)}`}
-          />
-        </Box>
-        <Box>
-          <SummaryCard
-            icon={<AccountBalanceIcon color="info" />}
-            label="Bancos"
-            value={(summary?.collections?.santander || 0) + (summary?.collections?.bancon || 0)}
-            detail={`Santander ${formatCurrency(summary?.collections?.santander || 0)} / Bancor ${formatCurrency(summary?.collections?.bancon || 0)}`}
-          />
-        </Box>
-        <Box>
-          <SummaryCard
-            icon={<ReceiptLongIcon color="warning" />}
-            label="Deuda cuenta corriente"
-            value={summary?.account_current?.total_debt}
-            detail="Saldo pendiente de clientes"
-          />
-        </Box>
-      </Box>
-
-      <Card>
-        <CardContent>
-          <Stack spacing={2}>
-            <Box>
-              <Typography variant="h6" fontWeight={700}>Terminales Getnet</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Cada codigo POS se vincula a una sucursal y conserva esa asignacion en futuras importaciones.
-              </Typography>
-            </Box>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Terminal</TableCell>
-                  <TableCell>Establecimiento</TableCell>
-                  <TableCell>Sucursal</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {terminals.map((terminal) => (
-                  <TableRow key={terminal.id}>
-                    <TableCell>{terminal.code}</TableCell>
-                    <TableCell>{terminal.establishment_name || terminal.establishment_number || '-'}</TableCell>
-                    <TableCell sx={{ minWidth: 220 }}>
-                      <FormControl fullWidth size="small">
-                        <Select
-                          aria-label={`Sucursal terminal ${terminal.code}`}
-                          value={terminal.branch?.id && branches.some((branch) => branch.id === terminal.branch.id)
-                            ? String(terminal.branch.id)
-                            : ''}
-                          disabled={actionLoading}
-                          onChange={(event) => updateTerminalBranch(terminal.id, event.target.value)}
-                        >
-                          <MenuItem value="">Sin sucursal</MenuItem>
-                          {branches.map((branch) => (
-                            <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {!terminals.length && (
-                  <TableRow>
-                    <TableCell colSpan={3}>
-                      <Typography color="text.secondary">Todavia no se importaron terminales Getnet.</Typography>
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent>
-          <Stack spacing={2}>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
-              <Box>
-                <Typography variant="h6" fontWeight={700}>Facturar cupones posnet</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Cada cupon seleccionado genera una Factura B a consumidor final con el IVA incluido en el importe.
-                </Typography>
-              </Box>
-              <Stack spacing={0.5} alignItems={{ md: 'flex-end' }}>
-                <Chip color={arcaModeColor(arcaStatus)} label={arcaModeLabel(arcaStatus)} />
-                {arcaStatus?.provider === 'wsfe' && arcaStatus?.ready && (
-                  <Typography variant="caption" color="text.secondary">
-                    Punto de venta {arcaStatus.point_of_sale} · ultimo comprobante {arcaStatus.last_voucher_number}
-                  </Typography>
-                )}
-              </Stack>
-            </Stack>
-            {arcaStatus?.error && (
-              <Alert severity={arcaStatus.provider === 'wsfe' ? 'error' : 'info'}>{arcaStatus.error}</Alert>
-            )}
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
-              <FormControl sx={{ minWidth: 170 }}>
-                <InputLabel id="vat-rate-select">Alicuota</InputLabel>
-                <Select
-                  labelId="vat-rate-select"
-                  label="Alicuota"
-                  value={vatRate}
-                  onChange={(event) => setVatRate(event.target.value)}
-                >
-                  {VAT_RATES.map((item) => (
-                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <Button
-                variant="contained"
-                startIcon={<ReceiptLongIcon />}
-                disabled={actionLoading || selectedPayments.size === 0 || (arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready)}
-                onClick={() => setConfirmOpen(true)}
-              >
-                Facturar {selectedPayments.size} cupon(es) · {formatCurrency(selectedPaymentsTotal)}
-              </Button>
-            </Stack>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell padding="checkbox">
-                    <Checkbox
-                      inputProps={{ 'aria-label': 'Seleccionar todos los cupones' }}
-                      checked={getnetCandidates.length > 0 && selectedPayments.size === getnetCandidates.length}
-                      indeterminate={selectedPayments.size > 0 && selectedPayments.size < getnetCandidates.length}
-                      onChange={toggleAllPayments}
-                    />
-                  </TableCell>
-                  <TableCell>Fecha</TableCell>
-                  <TableCell>Terminal</TableCell>
-                  <TableCell>Tarjeta</TableCell>
-                  <TableCell>Cupon</TableCell>
-                  <TableCell>Estado</TableCell>
-                  <TableCell align="right">Importe</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {getnetCandidates.map((payment) => (
-                  <TableRow key={payment.id} hover>
-                    <TableCell padding="checkbox">
-                      <Checkbox
-                        inputProps={{ 'aria-label': `Seleccionar cupon ${payment.coupon_number || payment.external_id}` }}
-                        checked={selectedPayments.has(payment.id)}
-                        onChange={() => togglePayment(payment.id)}
-                      />
-                    </TableCell>
-                    <TableCell>{payment.date}</TableCell>
-                    <TableCell>{payment.terminal?.code || '-'}</TableCell>
-                    <TableCell>{[payment.brand, payment.card_last_four].filter(Boolean).join(' ') || '-'}</TableCell>
-                    <TableCell>{payment.coupon_number || payment.external_id}</TableCell>
-                    <TableCell>
-                      {payment.invoice_status ? (
-                        <Stack spacing={0.5} alignItems="flex-start">
-                          <Chip size="small" color={statusColor(payment.invoice_status)} label="Reintentar" />
-                          {payment.invoice_error && (
-                            <Typography variant="caption" color="error">{payment.invoice_error}</Typography>
-                          )}
-                        </Stack>
-                      ) : (
-                        <Typography variant="caption" color="text.secondary">Sin facturar</Typography>
-                      )}
-                    </TableCell>
-                    <TableCell align="right">{formatCurrency(payment.amount)}</TableCell>
-                  </TableRow>
-                ))}
-                {!getnetCandidates.length && (
-                  <TableRow>
-                    <TableCell colSpan={7}>
-                      <Typography color="text.secondary">No hay cupones pendientes de facturar en el periodo.</Typography>
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-            {getnetResults?.results?.some((item) => !item.ok) && (
-              <Alert severity="warning">
-                {getnetResults.results.filter((item) => !item.ok).map((item) => (
-                  <div key={item.payment_id}>{item.detail}</div>
-                ))}
-              </Alert>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent>
-          <Stack spacing={2}>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
-              <Box>
-                <Typography variant="h6" fontWeight={700}>Facturas manuales</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Para ventas que no pasaron por el posnet (efectivo, transferencia). Cada importe genera una Factura B a consumidor final con el IVA incluido.
-                </Typography>
-              </Box>
-              <Box sx={{ textAlign: { md: 'right' } }}>
-                <Typography variant="body2" color="text.secondary">Facturado en el mes</Typography>
-                <Typography variant="h6" fontWeight={700}>{formatCurrency(summary?.invoices?.authorized_total)}</Typography>
-              </Box>
-            </Stack>
-
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
-              <TextField
-                label="Total a repartir"
-                value={splitTotal}
-                onChange={(event) => setSplitTotal(event.target.value)}
-                placeholder="1.000.000"
-                size="small"
-              />
-              <TextField
-                label="Cantidad de facturas"
-                type="number"
-                value={splitCount}
-                onChange={(event) => setSplitCount(event.target.value)}
-                inputProps={{ min: 1, max: 100 }}
-                size="small"
-                sx={{ width: { md: 180 } }}
-              />
-              <Button variant="outlined" onClick={applySplit} disabled={actionLoading}>Repartir</Button>
-            </Stack>
-
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell sx={{ width: 48 }}>#</TableCell>
-                  <TableCell sx={{ width: 220 }}>Importe</TableCell>
-                  <TableCell>Detalle (opcional)</TableCell>
-                  <TableCell sx={{ width: 90 }} />
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {manualRows.map((row, index) => {
-                  const invalid = String(row.amount || '').trim() !== '' && !(manualAmounts[index] > 0)
-                  return (
-                    <TableRow key={index}>
-                      <TableCell>{index + 1}</TableCell>
-                      <TableCell>
-                        <TextField
-                          size="small"
-                          fullWidth
-                          value={row.amount}
-                          error={invalid}
-                          helperText={invalid ? 'Importe invalido' : ''}
-                          onChange={(event) => updateManualRow(index, 'amount', event.target.value)}
-                          inputProps={{ 'aria-label': `Importe factura manual ${index + 1}` }}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <TextField
-                          size="small"
-                          fullWidth
-                          placeholder="Venta mostrador"
-                          value={row.description}
-                          onChange={(event) => updateManualRow(index, 'description', event.target.value)}
-                          inputProps={{ maxLength: 255, 'aria-label': `Detalle factura manual ${index + 1}` }}
-                        />
-                      </TableCell>
-                      <TableCell align="right">
-                        <Button size="small" onClick={() => removeManualRow(index)} disabled={actionLoading}>Quitar</Button>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}>
-              <Button variant="text" onClick={addManualRow} disabled={actionLoading || manualRows.length >= 100}>
-                Agregar importe
-              </Button>
-              <FormControl sx={{ minWidth: 170 }} size="small">
-                <InputLabel id="manual-vat-rate-select">Alicuota</InputLabel>
-                <Select
-                  labelId="manual-vat-rate-select"
-                  label="Alicuota"
-                  value={manualVatRate}
-                  onChange={(event) => setManualVatRate(event.target.value)}
-                >
-                  {VAT_RATES.map((item) => (
-                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <Box sx={{ flexGrow: 1 }} />
-              <Button
-                variant="contained"
-                startIcon={<ReceiptLongIcon />}
-                disabled={
-                  actionLoading
-                  || manualInvalid
-                  || manualTotal <= 0
-                  || (arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready)
-                }
-                onClick={() => setManualConfirmOpen(true)}
-              >
-                Emitir {manualFilledRows.length} factura(s) · {formatCurrency(manualTotal)}
-              </Button>
-            </Stack>
-
-            {manualResults?.results?.some((item) => !item.ok) && (
-              <Alert severity="warning">
-                {manualResults.results.filter((item) => !item.ok).map((item) => (
-                  <div key={item.row}>Fila {item.row} ({formatCurrency(item.amount)}): {item.detail}</div>
-                ))}
-              </Alert>
-            )}
-          </Stack>
-        </CardContent>
-      </Card>
-
-      <Dialog open={manualConfirmOpen} onClose={() => setManualConfirmOpen(false)}>
-        <DialogTitle>Confirmar facturas manuales</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Se van a emitir {manualFilledRows.length} Factura(s) B a consumidor final por un total de {formatCurrency(manualTotal)} con {manualVatRate.replace('.', ',')}% de IVA incluido.
-            {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
-              ? ' Son comprobantes reales: una vez autorizados solo se anulan con nota de credito.'
-              : ' Ambiente de prueba: los comprobantes no tienen validez fiscal.'}
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setManualConfirmOpen(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={issueManualInvoices}>Emitir</Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={Boolean(cancelTarget)} onClose={() => setCancelTarget(null)}>
-        <DialogTitle>Anular factura</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2}>
-            <DialogContentText>
-              Se va a emitir una nota de credito por {formatCurrency(cancelTarget?.total_amount)} que anula la
-              {' '}{formatVoucher(cancelTarget)}.
-              {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
-                ? ' Es un comprobante real ante ARCA y no se puede deshacer.'
-                : ' Ambiente de prueba: el comprobante no tiene validez fiscal.'}
-              {' '}Los cupones de esta factura vuelven a quedar disponibles para facturar.
-            </DialogContentText>
-            <TextField
-              label="Motivo (opcional)"
-              value={cancelReason}
-              onChange={(event) => setCancelReason(event.target.value)}
-              inputProps={{ maxLength: 255 }}
-              fullWidth
+        {(loading || busy) && <LinearProgress />}
+        <Box sx={{ p: { xs: 2, md: 3 } }}>
+          {tab === 'comprobantes' && (
+            <InvoicesPanel invoices={invoices} loading={loading} periodLabel={periodLabel} onOpenInvoice={setDetailInvoiceId} />
+          )}
+          {tab === 'cupones' && (
+            <CouponsPanel candidates={candidates} arcaStatus={arcaStatus} onDone={refresh} {...panelProps} />
+          )}
+          {tab === 'manuales' && (
+            <ManualInvoicesPanel
+              arcaStatus={arcaStatus}
+              branchId={branchId}
+              monthInvoiced={summary?.invoices?.authorized_total}
+              onDone={refresh}
+              {...panelProps}
             />
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setCancelTarget(null)}>Cancelar</Button>
-          <Button variant="contained" color="error" onClick={cancelInvoice}>Emitir nota de credito</Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle>Confirmar facturacion</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Se van a emitir {selectedPayments.size} Factura(s) B a consumidor final por {formatCurrency(selectedPaymentsTotal)} con {vatRate.replace('.', ',')}% de IVA incluido.
-            {arcaStatus?.provider === 'wsfe' && arcaStatus?.environment === 'produccion'
-              ? ' Son comprobantes reales: una vez autorizados solo se anulan con nota de credito.'
-              : ' Ambiente de prueba: los comprobantes no tienen validez fiscal.'}
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmOpen(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={invoiceGetnetPayments}>Emitir</Button>
-        </DialogActions>
-      </Dialog>
-
-      <Card>
-        <CardContent>
-          <Stack spacing={2}>
-            <Box>
-              <Typography variant="h6" fontWeight={700}>Facturar cuenta corriente</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Selecciona un cliente, revisa sus movimientos pendientes y genera la factura.
-              </Typography>
-            </Box>
-            <FormControl fullWidth>
-              <InputLabel id="invoice-branch-select">Sucursal a facturar</InputLabel>
-              <Select
-                labelId="invoice-branch-select"
-                label="Sucursal a facturar"
-                value={invoiceBranchId}
-                onChange={(event) => changeInvoiceBranch(event.target.value)}
-              >
-                <MenuItem value="" disabled>Seleccionar sucursal</MenuItem>
-                {branches.map((branch) => (
-                  <MenuItem key={branch.id} value={String(branch.id)}>{branch.name}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <Autocomplete
-              loading={clientLoading}
-              disabled={branches.length > 1 && !invoiceBranchId}
-              options={clients}
-              value={selectedClient}
-              onChange={(_event, value) => setSelectedClient(value)}
-              getOptionLabel={(option) => `${option.full_name || option.name || option.external_id} - ${formatCurrency(invoiceBranchId ? option.branch_total_debt : option.total_debt)}`}
-              renderInput={(params) => <TextField {...params} label="Cliente" />}
+          )}
+          {tab === 'cuenta' && (
+            <AccountInvoicePanel
+              branches={branches}
+              branchId={branchId}
+              onBranchChange={setBranchId}
+              totalDebt={summary?.account_current?.total_debt}
+              onDone={refresh}
+              {...panelProps}
             />
-            {clientLoading && <LinearProgress />}
-            {preview && (
-              <Stack spacing={2}>
-                <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }} justifyContent="space-between">
-                  <Box>
-                    <Typography fontWeight={700}>{preview.client.name}</Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {preview.branch?.name ? `${preview.branch.name} - ` : ''}Pendiente para facturar: {formatCurrency(preview.total_pending_to_invoice)}
-                    </Typography>
-                  </Box>
-                  <Button
-                    variant="contained"
-                    startIcon={<ReceiptLongIcon />}
-                    disabled={actionLoading || selectedTx.size === 0 || (branches.length > 0 && !invoiceBranchId)}
-                    onClick={createInvoice}
-                  >
-                    Facturar {formatCurrency(selectedTotal)}
-                  </Button>
-                </Stack>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell padding="checkbox" />
-                      <TableCell>Fecha</TableCell>
-                      <TableCell>Detalle</TableCell>
-                      <TableCell align="right">Pendiente</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {(preview.transactions || []).map((tx) => (
-                      <TableRow key={tx.id} hover>
-                        <TableCell padding="checkbox">
-                          <Checkbox checked={selectedTx.has(tx.id)} onChange={() => toggleTx(tx.id)} />
-                        </TableCell>
-                        <TableCell>{tx.date || '-'}</TableCell>
-                        <TableCell>{tx.description || tx.id}</TableCell>
-                        <TableCell align="right">{formatCurrency(tx.remaining)}</TableCell>
-                      </TableRow>
-                    ))}
-                    {(!preview.transactions || preview.transactions.length === 0) && (
-                      <TableRow>
-                        <TableCell colSpan={4}>
-                          <Typography color="text.secondary">No hay movimientos pendientes para facturar.</Typography>
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </Stack>
-            )}
-          </Stack>
-        </CardContent>
+          )}
+          {tab === 'cobros' && (
+            <PaymentsPanel payments={payments} loading={loading} onDone={refresh} {...panelProps} />
+          )}
+          {tab === 'terminales' && (
+            <TerminalsPanel terminals={terminals} branches={branches} onDone={refresh} {...panelProps} />
+          )}
+        </Box>
       </Card>
 
-      <Card>
-        <CardContent>
-          <Stack spacing={2}>
-            <Typography variant="h6" fontWeight={700}>Registrar cobro</Typography>
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-              <FormControl sx={{ minWidth: 170 }}>
-                <InputLabel>Medio</InputLabel>
-                <Select
-                  label="Medio"
-                  value={paymentForm.source}
-                  onChange={(event) => setPaymentForm((prev) => ({ ...prev, source: event.target.value }))}
-                >
-                  {PAYMENT_SOURCES.map((item) => (
-                    <MenuItem key={item.value} value={item.value}>{item.label}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <TextField
-                label="Importe"
-                value={paymentForm.amount}
-                onChange={(event) => setPaymentForm((prev) => ({ ...prev, amount: event.target.value }))}
-              />
-              <TextField
-                label="Fecha"
-                type="date"
-                value={paymentForm.date}
-                onChange={(event) => setPaymentForm((prev) => ({ ...prev, date: event.target.value }))}
-                InputLabelProps={{ shrink: true }}
-              />
-              <TextField
-                label="Referencia"
-                value={paymentForm.external_id}
-                onChange={(event) => setPaymentForm((prev) => ({ ...prev, external_id: event.target.value }))}
-              />
-              <Button variant="outlined" onClick={createPayment} disabled={actionLoading || !paymentForm.amount}>
-                Registrar
-              </Button>
-            </Stack>
-          </Stack>
-        </CardContent>
-      </Card>
+      <InvoiceDetailDrawer
+        invoiceId={detailInvoiceId}
+        onClose={() => setDetailInvoiceId(null)}
+        authFetch={authFetch}
+        arcaStatus={arcaStatus}
+        onChanged={refresh}
+        notify={notify}
+      />
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 7fr) minmax(0, 5fr)' }, gap: 2 }}>
-        <Box>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" fontWeight={700}>Facturas del mes</Typography>
-              <Divider sx={{ my: 2 }} />
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Fecha</TableCell>
-                    <TableCell>Comprobante</TableCell>
-                    <TableCell>Cliente</TableCell>
-                    <TableCell>Sucursal</TableCell>
-                    <TableCell>Estado</TableCell>
-                    <TableCell align="right">Total</TableCell>
-                    <TableCell />
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {invoices.map((invoice) => (
-                    <TableRow key={invoice.id}>
-                      <TableCell>{invoice.issue_date}</TableCell>
-                      <TableCell>
-                        <Typography variant="body2">{formatVoucher(invoice)}</Typography>
-                        {invoice.cae && (
-                          <Typography variant="caption" color="text.secondary">CAE {invoice.cae}</Typography>
-                        )}
-                      </TableCell>
-                      <TableCell>{invoice.client_name || (['getnet', 'manual'].includes(invoice.source) ? 'Consumidor final' : '-')}</TableCell>
-                      <TableCell>{invoice.branch?.name || '-'}</TableCell>
-                      <TableCell>
-                        <Stack spacing={0.5} alignItems="flex-start">
-                          <Chip size="small" color={statusColor(invoice.status)} label={invoice.status_label} />
-                          {invoice.cancelled_by_voucher && (
-                            <Typography variant="caption" color="text.secondary">Por {invoice.cancelled_by_voucher}</Typography>
-                          )}
-                          {invoice.cancels_voucher && (
-                            <Typography variant="caption" color="text.secondary">Anula {invoice.cancels_voucher}</Typography>
-                          )}
-                          {invoice.error_message && invoice.status !== 'authorized' && (
-                            <Typography variant="caption" color="error">{invoice.error_message}</Typography>
-                          )}
-                        </Stack>
-                      </TableCell>
-                      <TableCell align="right">
-                        {invoice.is_credit_note ? `- ${formatCurrency(invoice.total_amount)}` : formatCurrency(invoice.total_amount)}
-                      </TableCell>
-                      <TableCell align="right">
-                        {invoice.status === 'authorized' && !invoice.is_credit_note && invoice.voucher_number && (
-                          <Button
-                            size="small"
-                            color="error"
-                            disabled={actionLoading}
-                            onClick={() => openCancelDialog(invoice)}
-                          >
-                            Anular
-                          </Button>
-                        )}
-                        {['error', 'rejected', 'draft'].includes(invoice.status) && (
-                          <Button
-                            size="small"
-                            disabled={actionLoading}
-                            onClick={() => retryInvoice(invoice)}
-                          >
-                            Reintentar
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {!invoices.length && (
-                    <TableRow>
-                      <TableCell colSpan={7}>
-                        <Typography color="text.secondary">Sin facturas en el periodo.</Typography>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </Box>
-        <Box>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" fontWeight={700}>Cobros registrados</Typography>
-              <Divider sx={{ my: 2 }} />
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Fecha</TableCell>
-                    <TableCell>Medio</TableCell>
-                    <TableCell>Terminal</TableCell>
-                    <TableCell>Estado</TableCell>
-                    <TableCell align="right">Importe</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {payments.map((payment) => (
-                    <TableRow key={payment.id}>
-                      <TableCell>{payment.date}</TableCell>
-                      <TableCell>{payment.source_label}</TableCell>
-                      <TableCell>{payment.terminal?.code || '-'}</TableCell>
-                      <TableCell>
-                        <Stack spacing={0.5} alignItems="flex-start">
-                          <Chip size="small" color={statusColor(payment.status)} label={payment.status_label} />
-                          {payment.provider_status && (
-                            <Typography variant="caption" color="text.secondary">Getnet: {payment.provider_status}</Typography>
-                          )}
-                        </Stack>
-                      </TableCell>
-                      <TableCell align="right">{formatCurrency(payment.amount)}</TableCell>
-                    </TableRow>
-                  ))}
-                  {!payments.length && (
-                    <TableRow>
-                      <TableCell colSpan={5}>
-                        <Typography color="text.secondary">Sin cobros registrados en el periodo.</Typography>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </Box>
-      </Box>
+      <Snackbar
+        open={Boolean(toast)}
+        autoHideDuration={6000}
+        onClose={() => setToast(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        {toast ? (
+          <Alert severity={toast.severity} variant="filled" onClose={() => setToast(null)} sx={{ width: '100%' }}>
+            {toast.message}
+          </Alert>
+        ) : <span />}
+      </Snackbar>
     </Stack>
   )
 }
