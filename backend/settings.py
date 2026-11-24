@@ -41,24 +41,24 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 _default_allowed_hosts = [
     "localhost",
     "127.0.0.1",
-    "api.mativiglianco.cloud",
-    "vales.mativiglianco.cloud",
+    "api.mativiglianco.online",
+    "vales.mativiglianco.online",
     "31.97.86.142",
 ]
 ALLOWED_HOSTS = merge_csv_setting("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts)
 _default_cors = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://api.mativiglianco.cloud",
-    "https://vales.mativiglianco.cloud",
+    "https://api.mativiglianco.online",
+    "https://vales.mativiglianco.online",
     "https://mativiglianco.github.io",
 ]
 CORS_ALLOWED_ORIGINS = merge_csv_setting("CORS_ALLOWED_ORIGINS", _default_cors)
 _default_csrf = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://api.mativiglianco.cloud",
-    "https://vales.mativiglianco.cloud",
+    "https://api.mativiglianco.online",
+    "https://vales.mativiglianco.online",
     "https://mativiglianco.github.io",
 ]
 CSRF_TRUSTED_ORIGINS = merge_csv_setting("CSRF_TRUSTED_ORIGINS", _default_csrf)
