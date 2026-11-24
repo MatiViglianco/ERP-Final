@@ -53,8 +53,8 @@ Additional product views are available in the [professional portfolio](https://m
 ## Live surfaces
 
 - [Authenticated frontend](https://mativiglianco.github.io/ERP-Final/)
-- [OCR voucher frontend](https://vales.mativiglianco.cloud/)
-- Backend API: `https://api.mativiglianco.cloud/api`
+- [OCR voucher frontend](https://vales.mativiglianco.online/)
+- Backend API: `https://api.mativiglianco.online/api`
 
 The live applications require authorized credentials. Public visitors can review the architecture, tests and implementation in this repository without accessing business data.
 
