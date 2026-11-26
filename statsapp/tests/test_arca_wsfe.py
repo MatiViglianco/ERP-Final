@@ -365,6 +365,70 @@ class GetnetInvoicingApiTests(TestCase):
         self.assertIn('ya esta facturado', again.data['results'][0]['detail'])
         self.assertEqual(Invoice.objects.filter(source=Invoice.Source.GETNET).count(), 1)
 
+    def _coupon(self, external_id, *, day_offset=0, operated_at=None, coupon_number=''):
+        getnet = {'coupon_number': coupon_number}
+        if operated_at:
+            getnet['operated_at'] = operated_at
+        return Payment.objects.create(
+            source=Payment.Source.GETNET,
+            status=Payment.Status.RECONCILED,
+            date=self.payment.date + timedelta(days=day_offset),
+            amount=Decimal('1000.00'),
+            external_id=external_id,
+            idempotency_key=f'getnet:{external_id}',
+            terminal=self.payment.terminal,
+            meta={'getnet_csv': getnet},
+        )
+
+    def test_lists_coupons_from_oldest_to_newest_operation(self):
+        # El CSV de Getnet viene del mas nuevo al mas viejo: se crean en ese orden.
+        Payment.objects.filter(pk=self.payment.pk).delete()
+        day = self.payment.date.isoformat()
+        self._coupon('late', operated_at=f'{day}T18:30:00', coupon_number='3')
+        self._coupon('early', operated_at=f'{day}T08:05:00', coupon_number='1')
+        self._coupon('noon', operated_at=f'{day}T12:00:00', coupon_number='2')
+
+        response = self.api.get('/api/billing/getnet/invoiceable/', self.params)
+
+        self.assertEqual([item['external_id'] for item in response.data], ['early', 'noon', 'late'])
+        self.assertEqual(response.data[0]['operated_at'], f'{day}T08:05:00')
+
+    def test_coupons_without_operation_time_fall_back_to_coupon_number(self):
+        Payment.objects.filter(pk=self.payment.pk).delete()
+        self._coupon('c-20056', coupon_number='20056')
+        self._coupon('c-20051', coupon_number='20051')
+        self._coupon('c-20053', coupon_number='20053')
+
+        response = self.api.get('/api/billing/getnet/invoiceable/', self.params)
+
+        self.assertEqual([item['external_id'] for item in response.data], ['c-20051', 'c-20053', 'c-20056'])
+
+    def test_invoices_coupons_in_chronological_order(self):
+        Payment.objects.filter(pk=self.payment.pk).delete()
+        day = self.payment.date.isoformat()
+        late = self._coupon('late', operated_at=f'{day}T18:30:00')
+        early = self._coupon('early', operated_at=f'{day}T08:05:00')
+
+        response = self.api.post(
+            '/api/billing/getnet/invoices/',
+            {'payment_ids': [str(late.id), str(early.id)], 'vat_rate': '10.5'},
+            format='json',
+        )
+
+        self.assertEqual(response.data['authorized'], 2)
+        late.refresh_from_db()
+        early.refresh_from_db()
+        self.assertLess(early.invoice.voucher_number, late.invoice.voucher_number)
+
+    def test_rejects_more_than_200_coupons_per_request(self):
+        response = self.api.post(
+            '/api/billing/getnet/invoices/',
+            {'payment_ids': [str(self.payment.id)] * 201},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('200', response.data['detail'])
+
     def test_rejects_unsupported_vat_rate(self):
         response = self.api.post(
             '/api/billing/getnet/invoices/',

@@ -95,9 +95,11 @@ def _signed_amount(row):
     return amount
 
 
-def _safe_metadata(row, filename):
+def _safe_metadata(row, filename, operation_datetime):
     return {
         'source_file': filename,
+        # Hora de la operacion: ordena los cupones de un mismo dia.
+        'operated_at': operation_datetime.isoformat(),
         'establishment_number': str(row.get('Nro de Establecimiento') or '').strip(),
         'establishment_name': str(row.get('Nombre Establecimiento') or '').strip(),
         'provider_status': str(row.get('Estado') or '').strip(),
@@ -213,7 +215,7 @@ def import_getnet_csv(uploaded_file, default_branch=None):
 
         existing = Payment.objects.filter(idempotency_key=key).first()
         meta = dict(existing.meta or {}) if existing else {}
-        meta['getnet_csv'] = _safe_metadata(row, filename)
+        meta['getnet_csv'] = _safe_metadata(row, filename, operation_datetime)
         payment, created = Payment.objects.update_or_create(
             idempotency_key=key,
             defaults={

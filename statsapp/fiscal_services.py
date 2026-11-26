@@ -473,11 +473,31 @@ def getnet_invoiceable_payments(start_date, end_date, terminal_id=None, branch_i
     return queryset.order_by('date', 'created_at')
 
 
+def getnet_chronological_key(payment):
+    """Orden de la operacion mas vieja a la mas nueva.
+
+    Usa la hora de operacion del CSV; los cupones importados antes de guardarla
+    se ordenan por numero de cupon, que Getnet asigna en forma creciente.
+    """
+    getnet = (payment.meta or {}).get('getnet_csv') or {}
+    coupon = str(getnet.get('coupon_number') or '').strip()
+    coupon_number = int(coupon) if coupon.isdigit() else None
+    return (
+        payment.date,
+        getnet.get('operated_at') or '',
+        coupon_number is None,
+        coupon_number or 0,
+        payment.created_at,
+        str(payment.pk),
+    )
+
+
 def getnet_candidate_payload(payment):
     getnet = (payment.meta or {}).get('getnet_csv') or {}
     invoice = payment.invoice
     return {
         **payment_payload(payment),
+        'operated_at': getnet.get('operated_at') or None,
         'brand': getnet.get('brand', ''),
         'card_last_four': getnet.get('card_last_four', ''),
         'coupon_number': getnet.get('coupon_number', ''),
@@ -572,12 +592,14 @@ def create_getnet_invoices(payment_ids, vat_rate=None, created_by=None):
     if len(payment_ids) > 200:
         raise FiscalError('Se pueden facturar hasta 200 cupones por vez')
     rate = parse_vat_rate(vat_rate)
-    ordered_ids = list(
-        Payment.objects
-        .filter(pk__in=payment_ids)
-        .order_by('date', 'created_at')
-        .values_list('pk', flat=True)
-    )
+    # Se emiten en orden cronologico para que la numeracion siga el orden de las ventas.
+    ordered_ids = [
+        payment.pk
+        for payment in sorted(
+            Payment.objects.filter(pk__in=payment_ids).only('pk', 'date', 'meta', 'created_at'),
+            key=getnet_chronological_key,
+        )
+    ]
     missing = {str(pk) for pk in payment_ids} - {str(pk) for pk in ordered_ids}
 
     results = [

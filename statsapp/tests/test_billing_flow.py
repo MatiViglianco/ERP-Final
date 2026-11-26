@@ -76,8 +76,9 @@ class BillingFlowTests(TestCase):
         self.assertEqual(payment.amount, Decimal('24363.00'))
         self.assertEqual(payment.branch, branch)
         self.assertEqual(payment.terminal.code, 'AR002R9R')
+        self.assertEqual(payment.meta['getnet_csv']['operated_at'], '2026-07-14T09:14:49')
 
-        second = self.client_api.post(
+        second =self.client_api.post(
             '/api/billing/getnet/import/',
             {
                 'file': self.getnet_csv_file(status='Pendiente', amount='25000'),
