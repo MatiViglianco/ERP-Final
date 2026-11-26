@@ -104,7 +104,6 @@ export default function BillingPage() {
   const [branchId, setBranchId] = useState('')
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
   const [toast, setToast] = useState(null)
   const [detailInvoiceId, setDetailInvoiceId] = useState(null)
   const [verifyOpen, setVerifyOpen] = useState(false)
@@ -118,13 +117,10 @@ export default function BillingPage() {
 
   const periodLabel = `${year}-${String(month).padStart(2, '0')}`
 
+  // Errores y avisos se muestran como popup; los errores quedan mas tiempo y arriba.
   const notify = useCallback((severity, message) => {
-    if (severity === 'error') {
-      setError(message)
-    } else {
-      setError('')
-      setToast({ severity, message })
-    }
+    if (!message) return
+    setToast({ severity, message, key: Date.now() })
   }, [])
 
   const loadArcaStatus = useCallback(async () => {
@@ -137,7 +133,6 @@ export default function BillingPage() {
 
   const loadAll = useCallback(async () => {
     setLoading(true)
-    setError('')
     try {
       const [summaryData, invoicesData, paymentsData, candidatesData, terminalsData] = await Promise.all([
         fetchJson(authFetch, `${API_BILLING_SUMMARY}?${queryString}`, 'No se pudo cargar el resumen'),
@@ -152,11 +147,11 @@ export default function BillingPage() {
       setCandidates(candidatesData || [])
       setTerminals(terminalsData || [])
     } catch (err) {
-      setError(err.message)
+      notify('error', err.message)
     } finally {
       setLoading(false)
     }
-  }, [authFetch, queryString])
+  }, [authFetch, queryString, notify])
 
   const refresh = useCallback(() => Promise.all([loadAll(), loadArcaStatus()]), [loadAll, loadArcaStatus])
 
@@ -268,7 +263,6 @@ export default function BillingPage() {
           reintentando automaticamente.
         </Alert>
       )}
-      {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {branchesError && <Alert severity="warning">{branchesError}</Alert>}
 
       <SummaryCards summary={summary} pendingCoupons={candidates} loading={loading && !summary} />
@@ -346,13 +340,21 @@ export default function BillingPage() {
       />
 
       <Snackbar
+        key={toast?.key}
         open={Boolean(toast)}
-        autoHideDuration={6000}
-        onClose={() => setToast(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        autoHideDuration={toast?.severity === 'error' ? 10000 : 6000}
+        onClose={(_event, reason) => {
+          if (reason !== 'clickaway') setToast(null)
+        }}
+        anchorOrigin={{ vertical: toast?.severity === 'error' ? 'top' : 'bottom', horizontal: 'center' }}
       >
         {toast ? (
-          <Alert severity={toast.severity} variant="filled" onClose={() => setToast(null)} sx={{ width: '100%' }}>
+          <Alert
+            severity={toast.severity}
+            variant="filled"
+            onClose={() => setToast(null)}
+            sx={{ width: '100%', maxWidth: 560, whiteSpace: 'pre-line', boxShadow: 6 }}
+          >
             {toast.message}
           </Alert>
         ) : <span />}

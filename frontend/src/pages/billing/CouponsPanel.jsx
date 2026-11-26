@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react'
 import {
-  Alert,
   Box,
   Button,
   Checkbox,
@@ -31,8 +30,11 @@ import SearchIcon from '@mui/icons-material/Search'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import { API_BASE } from '../../config'
 import {
+  MAX_INVOICE_BATCH,
   VAT_RATES,
+  failureMessage,
   formatDate,
+  formatDateTime,
   formatMoney,
   isRealVoucher,
   normalizeText,
@@ -48,7 +50,6 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
   const [selected, setSelected] = useState(new Set())
   const [vatRate, setVatRate] = useState('10.5')
   const [confirmOpen, setConfirmOpen] = useState(false)
-  const [failures, setFailures] = useState([])
 
   const days = useMemo(() => [...new Set(candidates.map((item) => item.date))].sort(), [candidates])
 
@@ -76,25 +77,49 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
   const pageSomeSelected = pageItems.some((item) => selected.has(item.id))
   const arcaBlocked = arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready
 
-  const toggle = (id) => setSelected((prev) => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    return next
-  })
+  const limitReached = () => notify(
+    'warning',
+    `Se pueden facturar hasta ${MAX_INVOICE_BATCH} cupones por vez. Factura estos y despues segui con el resto.`,
+  )
 
-  const togglePage = () => setSelected((prev) => {
-    const next = new Set(prev)
-    pageItems.forEach((item) => (pageAllSelected ? next.delete(item.id) : next.add(item.id)))
-    return next
-  })
+  const toggle = (id) => {
+    if (!selected.has(id) && selected.size >= MAX_INVOICE_BATCH) {
+      limitReached()
+      return
+    }
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
-  const selectAllFiltered = () => setSelected(new Set(filtered.map((item) => item.id)))
+  const togglePage = () => {
+    const next = new Set(selected)
+    if (pageAllSelected) {
+      pageItems.forEach((item) => next.delete(item.id))
+    } else {
+      for (const item of pageItems) {
+        if (next.size >= MAX_INVOICE_BATCH) {
+          limitReached()
+          break
+        }
+        next.add(item.id)
+      }
+    }
+    setSelected(next)
+  }
+
+  // La lista viene de la mas vieja a la mas nueva: se toman las primeras, sin saltear ninguna.
+  const batchSize = Math.min(filtered.length, MAX_INVOICE_BATCH)
+  const oldestBatch = filtered.slice(0, batchSize)
+  const oldestBatchSelected = selected.size === batchSize && oldestBatch.every((item) => selected.has(item.id))
+  const selectOldestBatch = () => setSelected(new Set(oldestBatch.map((item) => item.id)))
 
   const issue = async () => {
     setConfirmOpen(false)
     setBusy(true)
-    setFailures([])
     try {
       const resp = await authFetch(API_GETNET_INVOICES, {
         method: 'POST',
@@ -104,10 +129,16 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudieron facturar los cupones')
       const failed = (data.results || []).filter((item) => !item.ok)
-      setFailures(failed)
       setSelected(new Set(failed.map((item) => item.payment_id)))
-      if (data.authorized) notify('success', `${data.authorized} factura(s) autorizada(s)`)
-      if (failed.length) notify('error', `${failed.length} cupon(es) no se pudieron facturar. Quedaron seleccionados para reintentar.`)
+      if (failed.length) {
+        notify('error', failureMessage(
+          `${data.authorized ? `${data.authorized} factura(s) autorizada(s). ` : ''}`
+            + `${failed.length} cupon(es) no se pudieron facturar y quedaron seleccionados para reintentar:`,
+          failed.map((item) => item.detail),
+        ))
+      } else if (data.authorized) {
+        notify('success', `${data.authorized} factura(s) autorizada(s)`)
+      }
       await onDone()
     } catch (err) {
       notify('error', err.message)
@@ -139,19 +170,17 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
           {filtered.length} cupon(es) · {formatMoney(filteredTotal)}
         </Typography>
         <Box sx={{ flexGrow: 1 }} />
-        {filtered.length > 0 && selected.size < filtered.length && (
-          <Button size="small" onClick={selectAllFiltered}>Seleccionar los {filtered.length}</Button>
+        {batchSize > 0 && !oldestBatchSelected && (
+          <Button size="small" onClick={selectOldestBatch}>
+            {filtered.length > MAX_INVOICE_BATCH
+              ? `Seleccionar los ${MAX_INVOICE_BATCH} mas viejos`
+              : `Seleccionar los ${filtered.length}`}
+          </Button>
         )}
         {selected.size > 0 && (
           <Button size="small" onClick={() => setSelected(new Set())}>Limpiar seleccion</Button>
         )}
       </Stack>
-
-      {failures.length > 0 && (
-        <Alert severity="warning" onClose={() => setFailures([])}>
-          {failures.map((item) => <div key={item.payment_id}>{item.detail}</div>)}
-        </Alert>
-      )}
 
       <TableContainer>
         <Table size="small" aria-label="Cupones posnet sin facturar">
@@ -191,7 +220,7 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
                     onChange={() => toggle(item.id)}
                   />
                 </TableCell>
-                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(item.date)}</TableCell>
+                <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDateTime(item.date, item.operated_at)}</TableCell>
                 <TableCell>{item.coupon_number || item.external_id}</TableCell>
                 <TableCell sx={{ textTransform: 'capitalize' }}>
                   {[item.brand, item.card_last_four && `**** ${item.card_last_four}`].filter(Boolean).join(' ') || '-'}
@@ -242,7 +271,10 @@ export default function CouponsPanel({ candidates, arcaStatus, authFetch, onDone
       >
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
           <Box sx={{ flexGrow: 1 }}>
-            <Typography fontWeight={700}>{selected.size} cupon(es) seleccionado(s)</Typography>
+            <Typography fontWeight={700}>
+              {selected.size} cupon(es) seleccionado(s)
+              {selected.size >= MAX_INVOICE_BATCH ? ` · maximo ${MAX_INVOICE_BATCH} por vez` : ''}
+            </Typography>
             <Typography variant="body2" color="text.secondary">Total {formatMoney(selectedTotal)} · una Factura B por cupon</Typography>
           </Box>
           <FormControl size="small" sx={{ minWidth: 150 }}>

@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react'
 import {
-  Alert,
   Box,
   Button,
   Dialog,
@@ -29,7 +28,15 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import CallSplitIcon from '@mui/icons-material/CallSplit'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import { API_BASE } from '../../config'
-import { VAT_RATES, formatCurrency, formatMoney, isRealVoucher, parseAmount, splitAmount } from './format'
+import {
+  VAT_RATES,
+  failureMessage,
+  formatCurrency,
+  formatMoney,
+  isRealVoucher,
+  parseAmount,
+  splitAmount,
+} from './format'
 
 const API_MANUAL_INVOICES = `${API_BASE}/billing/manual-invoices/`
 const EMPTY_ROW = { amount: '', description: '' }
@@ -42,7 +49,6 @@ export default function ManualInvoicesPanel({ arcaStatus, authFetch, branchId, m
   const [splitCount, setSplitCount] = useState('10')
   const [splitError, setSplitError] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
-  const [failures, setFailures] = useState([])
 
   const amounts = useMemo(() => rows.map((row) => parseAmount(row.amount)), [rows])
   const filledCount = rows.filter((row) => String(row.amount || '').trim() !== '').length
@@ -82,7 +88,6 @@ export default function ManualInvoicesPanel({ arcaStatus, authFetch, branchId, m
       .filter((item) => item.amount > 0)
     if (!items.length) return
     setBusy(true)
-    setFailures([])
     try {
       const resp = await authFetch(API_MANUAL_INVOICES, {
         method: 'POST',
@@ -92,9 +97,15 @@ export default function ManualInvoicesPanel({ arcaStatus, authFetch, branchId, m
       const data = await resp.json()
       if (!resp.ok) throw new Error(data.detail || 'No se pudieron emitir las facturas manuales')
       const failed = (data.results || []).filter((item) => !item.ok)
-      setFailures(failed)
-      if (data.authorized) notify('success', `${data.authorized} factura(s) manual(es) autorizada(s) por ${formatMoney(data.authorized_total)}`)
-      if (failed.length) notify('error', `${failed.length} factura(s) no se pudieron emitir. Quedaron cargadas para reintentar.`)
+      if (failed.length) {
+        notify('error', failureMessage(
+          `${data.authorized ? `${data.authorized} autorizada(s). ` : ''}`
+            + `${failed.length} factura(s) no se pudieron emitir y quedaron cargadas para reintentar:`,
+          failed.map((item) => `Fila ${item.row} (${formatMoney(item.amount)}): ${item.detail}`),
+        ))
+      } else if (data.authorized) {
+        notify('success', `${data.authorized} factura(s) manual(es) autorizada(s) por ${formatMoney(data.authorized_total)}`)
+      }
       setRows(failed.length
         ? failed.map((item) => ({ amount: String(item.amount), description: items[item.row - 1]?.description || '' }))
         : [{ ...EMPTY_ROW }])
@@ -201,12 +212,6 @@ export default function ManualInvoicesPanel({ arcaStatus, authFetch, branchId, m
               Agregar importe
             </Button>
           </Box>
-
-          {failures.length > 0 && (
-            <Alert severity="warning" onClose={() => setFailures([])}>
-              {failures.map((item) => <div key={item.row}>Fila {item.row} ({formatMoney(item.amount)}): {item.detail}</div>)}
-            </Alert>
-          )}
         </Stack>
 
         <Paper variant="outlined" sx={{ p: 2, alignSelf: 'start', position: { md: 'sticky' }, top: { md: 16 } }}>

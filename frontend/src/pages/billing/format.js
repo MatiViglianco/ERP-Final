@@ -151,6 +151,26 @@ export function csvNumber(value) {
   return Number(value || 0).toFixed(2).replace('.', ',')
 }
 
+// Tope de comprobantes por pedido de facturacion (el backend rechaza mas).
+export const MAX_INVOICE_BATCH = 200
+
+// Arma el texto de un popup de error con el detalle de las primeras fallas.
+export function failureMessage(headline, details, maxLines = 5) {
+  const lines = details.filter(Boolean)
+  const shown = lines.slice(0, maxLines)
+  const rest = lines.length - shown.length
+  return [headline, ...shown.map((line) => `• ${line}`), rest > 0 ? `y ${rest} mas` : '']
+    .filter(Boolean)
+    .join('\n')
+}
+
+// "03/11/2026 09:15" cuando hay hora de operacion; si no, solo la fecha.
+export function formatDateTime(date, dateTime) {
+  if (!dateTime) return formatDate(date)
+  const time = String(dateTime).slice(11, 16)
+  return time ? `${formatDate(date)} ${time}` : formatDate(date)
+}
+
 export const ROWS_PER_PAGE_OPTIONS = [10, 25, 50, 100]
 
 // Paginado del lado del cliente; vuelve a la primera pagina cuando cambian los filtros.

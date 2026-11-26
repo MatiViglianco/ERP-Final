@@ -22,6 +22,7 @@ from .fiscal_services import (
     create_manual_invoices,
     create_manual_payment,
     getnet_candidate_payload,
+    getnet_chronological_key,
     getnet_invoiceable_payments,
     invoice_payload,
     payment_payload,
@@ -142,7 +143,8 @@ def getnet_invoiceable(request):
         terminal_id=_positive_int(request.query_params.get('terminal_id')),
         branch_id=_positive_int(request.query_params.get('branch_id')),
     )
-    return Response([getnet_candidate_payload(payment) for payment in payments[:3000]])
+    ordered = sorted(payments[:3000], key=getnet_chronological_key)
+    return Response([getnet_candidate_payload(payment) for payment in ordered])
 
 
 @api_view(['POST'])
