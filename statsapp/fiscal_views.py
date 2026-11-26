@@ -7,6 +7,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 
+from .arca_client import ArcaError
+from .arca_retry import retry_pending_invoices, verify_invoices_with_arca
 from .arca_services import arca_status
 from .getnet_services import GetnetImportError, import_getnet_csv, terminal_payload
 from .fiscal_services import (
@@ -198,6 +200,29 @@ def manual_invoices_create(request):
 @permission_classes([IsAdminUser])
 def arca_status_view(request):
     return Response(arca_status())
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def arca_retry_view(request):
+    """Reintenta ya las facturas pendientes (lo mismo que hace el hilo automatico)."""
+    return Response(retry_pending_invoices())
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def arca_verify_view(request):
+    start = _parse_date(request.query_params.get('start_date'))
+    end = _parse_date(request.query_params.get('end_date'))
+    if not start or not end:
+        start, end = _month_range(request)
+    try:
+        return Response(verify_invoices_with_arca(start, end))
+    except ArcaError as exc:
+        return Response(
+            {'detail': f'No se pudo verificar con ARCA: {exc}'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
 
 @api_view(['GET'])

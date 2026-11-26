@@ -64,6 +64,13 @@ class ArcaServiceError(ArcaError):
         self.errors = errors or []
 
 
+class ArcaConnectionError(ArcaServiceError):
+    """ARCA no respondio (red caida, conexion cortada, HTTP 5xx sin SOAP Fault).
+
+    Es transitorio: la operacion se puede reintentar cuando el servicio vuelva.
+    """
+
+
 class _LegacyTLSAdapter(HTTPAdapter):
     """Los servidores de ARCA negocian claves DH chicas que OpenSSL 3 rechaza por defecto."""
 
@@ -92,9 +99,9 @@ class ArcaTransport:
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
-            raise ArcaServiceError(f'No se pudo conectar con ARCA: {exc}') from exc
+            raise ArcaConnectionError(f'No se pudo conectar con ARCA: {exc}') from exc
         if response.status_code >= 500 and b'Fault' not in response.content:
-            raise ArcaServiceError(f'ARCA respondio HTTP {response.status_code}')
+            raise ArcaConnectionError(f'ARCA respondio HTTP {response.status_code}')
         return response.content
 
 

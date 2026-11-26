@@ -184,6 +184,11 @@ ARCA_GETNET_VOUCHER_TYPE = int(os.environ.get("ARCA_GETNET_VOUCHER_TYPE", "6") o
 ARCA_DEFAULT_VAT_RATE = os.environ.get("ARCA_DEFAULT_VAT_RATE", "10.5")
 # Por encima de este importe ARCA exige identificar al consumidor final.
 ARCA_ANONYMOUS_CONSUMER_LIMIT = os.environ.get("ARCA_ANONYMOUS_CONSUMER_LIMIT", "10000000")
+# Cada cuantos segundos se reintentan las facturas que fallaron porque ARCA no
+# respondio (0 desactiva). Solo corre dentro de gunicorn (ver backend/wsgi.py).
+ARCA_AUTO_RETRY_SECONDS = int(os.environ.get("ARCA_AUTO_RETRY_SECONDS", "120") or "0")
+# Facturas mas viejas que esto no se reintentan solas: se revisan a mano.
+ARCA_AUTO_RETRY_MAX_AGE_DAYS = int(os.environ.get("ARCA_AUTO_RETRY_MAX_AGE_DAYS", "10") or "10")
 GETNET_WEBHOOK_SECRET = os.environ.get("GETNET_WEBHOOK_SECRET", "")
 
 # Logging a stdout para que los errores (p. ej. fallas del OCR) queden visibles

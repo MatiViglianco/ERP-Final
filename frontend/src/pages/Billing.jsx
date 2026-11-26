@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Box,
@@ -18,10 +18,11 @@ import {
   Typography,
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import FactCheckIcon from '@mui/icons-material/FactCheck'
 import { useAuth } from '../context/AuthContext.jsx'
 import { API_BASE } from '../config'
 import useBranches from '../hooks/useBranches.js'
-import { MONTHS, arcaModeColor, arcaModeLabel } from './billing/format'
+import { MONTHS, arcaModeColor, arcaModeLabel, formatCurrency } from './billing/format'
 import SummaryCards from './billing/SummaryCards.jsx'
 import InvoicesPanel from './billing/InvoicesPanel.jsx'
 import CouponsPanel from './billing/CouponsPanel.jsx'
@@ -30,6 +31,7 @@ import AccountInvoicePanel from './billing/AccountInvoicePanel.jsx'
 import PaymentsPanel from './billing/PaymentsPanel.jsx'
 import TerminalsPanel from './billing/TerminalsPanel.jsx'
 import InvoiceDetailDrawer from './billing/InvoiceDetailDrawer.jsx'
+import ArcaVerifyDialog from './billing/ArcaVerifyDialog.jsx'
 
 const API_BILLING_SUMMARY = `${API_BASE}/billing/summary/`
 const API_BILLING_INVOICES = `${API_BASE}/billing/invoices/`
@@ -37,6 +39,9 @@ const API_BILLING_PAYMENTS = `${API_BASE}/billing/payments/`
 const API_GETNET_TERMINALS = `${API_BASE}/billing/getnet/terminals/`
 const API_GETNET_INVOICEABLE = `${API_BASE}/billing/getnet/invoiceable/`
 const API_ARCA_STATUS = `${API_BASE}/billing/arca/status/`
+
+// Mientras la pagina esta abierta se vuelve a consultar ARCA para ver cuando vuelve.
+const ARCA_STATUS_POLL_MS = 60000
 
 const TABS = ['comprobantes', 'cupones', 'manuales', 'cuenta', 'cobros', 'terminales']
 const TAB_STORAGE_KEY = 'billing.tab'
@@ -102,6 +107,8 @@ export default function BillingPage() {
   const [error, setError] = useState('')
   const [toast, setToast] = useState(null)
   const [detailInvoiceId, setDetailInvoiceId] = useState(null)
+  const [verifyOpen, setVerifyOpen] = useState(false)
+  const pendingRetryRef = useRef(null)
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({ year, month })
@@ -159,7 +166,18 @@ export default function BillingPage() {
 
   useEffect(() => {
     loadArcaStatus()
+    const timer = window.setInterval(loadArcaStatus, ARCA_STATUS_POLL_MS)
+    return () => window.clearInterval(timer)
   }, [loadArcaStatus])
+
+  // Cuando el reintento automatico emite facturas pendientes, se recargan los datos.
+  const pendingRetryCount = arcaStatus?.pending_retry?.count
+  useEffect(() => {
+    if (pendingRetryCount === undefined) return
+    const previous = pendingRetryRef.current
+    pendingRetryRef.current = pendingRetryCount
+    if (previous !== null && pendingRetryCount < previous) loadAll()
+  }, [pendingRetryCount, loadAll])
 
   useEffect(() => {
     setBranchId((current) => {
@@ -216,6 +234,15 @@ export default function BillingPage() {
               ))}
             </Select>
           </FormControl>
+          {arcaStatus?.provider === 'wsfe' && (
+            <Tooltip title="Verificar con ARCA los comprobantes del mes">
+              <span>
+                <IconButton onClick={() => setVerifyOpen(true)} aria-label="Verificar comprobantes del mes con ARCA">
+                  <FactCheckIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
           <Tooltip title="Actualizar">
             <span>
               <IconButton onClick={refresh} disabled={loading} aria-label="Actualizar datos de facturacion">
@@ -227,7 +254,19 @@ export default function BillingPage() {
       </Stack>
 
       {arcaStatus?.provider === 'wsfe' && !arcaStatus?.ready && (
-        <Alert severity="error">No hay conexion con ARCA: {arcaStatus.error || 'revisa la configuracion'}. La emision esta pausada.</Alert>
+        <Alert severity="error">
+          No hay conexion con ARCA: {arcaStatus.error || 'revisa la configuracion'}. La emision esta pausada.
+          {pendingRetryCount > 0 && arcaStatus.auto_retry_seconds > 0 && (
+            <> {pendingRetryCount} factura(s) por {formatCurrency(arcaStatus.pending_retry.total)} quedaron en espera y
+              se emiten solas cuando ARCA vuelva.</>
+          )}
+        </Alert>
+      )}
+      {arcaStatus?.provider === 'wsfe' && arcaStatus?.ready && pendingRetryCount > 0 && (
+        <Alert severity="info">
+          ARCA volvio: {pendingRetryCount} factura(s) por {formatCurrency(arcaStatus.pending_retry.total)} se estan
+          reintentando automaticamente.
+        </Alert>
       )}
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
       {branchesError && <Alert severity="warning">{branchesError}</Alert>}
@@ -295,6 +334,15 @@ export default function BillingPage() {
         arcaStatus={arcaStatus}
         onChanged={refresh}
         notify={notify}
+      />
+
+      <ArcaVerifyDialog
+        open={verifyOpen}
+        onClose={() => setVerifyOpen(false)}
+        authFetch={authFetch}
+        year={year}
+        month={month}
+        periodLabel={periodLabel}
       />
 
       <Snackbar

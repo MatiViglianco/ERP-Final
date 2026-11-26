@@ -44,7 +44,9 @@ from .vales_views import (
 from .fiscal_views import (
     account_invoice_create_view,
     account_invoice_preview_view,
+    arca_retry_view,
     arca_status_view,
+    arca_verify_view,
     billing_dashboard,
     getnet_import,
     getnet_invoiceable,
@@ -121,6 +123,8 @@ urlpatterns = [
     path('billing/getnet/invoiceable/', getnet_invoiceable, name='billing_getnet_invoiceable'),
     path('billing/getnet/invoices/', getnet_invoices_create, name='billing_getnet_invoices'),
     path('billing/arca/status/', arca_status_view, name='billing_arca_status'),
+    path('billing/arca/retry/', arca_retry_view, name='billing_arca_retry'),
+    path('billing/arca/verify/', arca_verify_view, name='billing_arca_verify'),
     path('billing/manual-invoices/', manual_invoices_create, name='billing_manual_invoices'),
     path('salaries/summary/', salaries_dashboard, name='salaries_summary'),
     path('salaries/monthly/', salaries_monthly, name='salaries_monthly'),
