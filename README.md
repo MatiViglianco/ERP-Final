@@ -137,6 +137,8 @@ Real ARCA/WSFE authorization is intentionally not enabled by default. `ARCA_PROV
 - `ARCA_CUIT`, `ARCA_CERT_PATH`, `ARCA_KEY_PATH` and `ARCA_DEFAULT_POINT_OF_SALE` (a "RECE para aplicativo y web services" point of sale) are required. Certificate and private key are mounted as files and never committed.
 - Voucher numbers always come from `FECompUltimoAutorizado`, so the point of sale can be shared with another system. The WSAA access ticket is cached in the database because ARCA refuses a new one while the current one is valid.
 - An attempt left uncertain by a network error is recovered with `FECompConsultar` before any new request, so a coupon is never invoiced twice.
+- Invoices that failed because ARCA did not answer (connection reset, timeout, HTTP 5xx) are flagged and retried automatically every `ARCA_AUTO_RETRY_SECONDS` (default 120, `0` disables) once `FEDummy` reports ARCA up. The retry runs in a thread of each gunicorn worker, serialized with a Postgres advisory lock; invoices rejected by ARCA are never retried on their own, and failures older than `ARCA_AUTO_RETRY_MAX_AGE_DAYS` are left for manual review. `python manage.py retry_arca_invoices` (or `POST /api/billing/arca/retry/`) runs one pass on demand.
+- `python manage.py verify_arca_invoices --year 2026 --month 11` (or the check button on the billing page, `GET /api/billing/arca/verify/`) looks up every voucher the ERP has authorized in the month with `FECompConsultar`, compares CAE, amount and date, and lists numbers in the range that ARCA has but the ERP does not.
 
 ## Repository map
 

@@ -271,6 +271,14 @@ def _next_mock_voucher_number(invoice):
 
 
 def authorize_invoice(invoice):
+    invoice = _authorize_invoice(invoice)
+    if invoice.cancels_id:
+        # Una nota de credito reintentada tambien tiene que anular su factura.
+        finalize_credit_note(invoice)
+    return invoice
+
+
+def _authorize_invoice(invoice):
     if invoice.status == Invoice.Status.AUTHORIZED:
         return invoice
     if invoice.status == Invoice.Status.CANCELLED:
@@ -409,8 +417,23 @@ def create_credit_note(invoice_id, reason='', created_by=None):
             credit_note.save(update_fields=['status', 'updated_at'])
         raise
 
+    finalize_credit_note(credit_note, reason=reason)
+    return credit_note
+
+
+def finalize_credit_note(credit_note, reason=''):
+    """Con la nota de credito autorizada, anula la factura original y libera sus cupones.
+
+    Es idempotente: tambien la usa el reintento automatico cuando ARCA autoriza una
+    nota de credito que habia quedado pendiente.
+    """
+    if credit_note.status != Invoice.Status.AUTHORIZED or not credit_note.cancels_id:
+        return None
+    reason = reason or (credit_note.meta or {}).get('reason', '')
     with db_transaction.atomic():
-        original = Invoice.objects.select_for_update().get(pk=invoice_id)
+        original = Invoice.objects.select_for_update().get(pk=credit_note.cancels_id)
+        if original.status == Invoice.Status.CANCELLED:
+            return original
         meta = dict(original.meta or {})
         meta['cancelled_by'] = str(credit_note.id)
         meta['cancelled_voucher'] = _format_voucher(credit_note)
@@ -421,7 +444,7 @@ def create_credit_note(invoice_id, reason='', created_by=None):
         original.save(update_fields=['status', 'meta', 'updated_at'])
         # Los cupones vuelven a estar disponibles para facturar.
         Payment.objects.filter(invoice=original).update(invoice=None)
-    return credit_note
+    return original
 
 
 GETNET_INVOICEABLE_PAYMENT_STATUSES = (Payment.Status.APPROVED, Payment.Status.RECONCILED)

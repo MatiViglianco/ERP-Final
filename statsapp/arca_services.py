@@ -8,9 +8,11 @@ Reglas importantes:
 - Si una emision quedo en duda (error de red despues de enviar), el siguiente
   intento consulta FECompConsultar con el numero pendiente y, si coincide con la
   factura, adopta ese CAE en lugar de emitir otra.
+- Si ARCA no respondio, la factura queda en error con ``meta['arca_retry']`` y
+  ``arca_retry.py`` la vuelve a intentar sola cuando el servicio se recupera.
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
@@ -21,6 +23,7 @@ from .arca_client import (
     CREDIT_NOTE_VOUCHER_TYPES,
     WSFE_SEQUENCE_ERROR_CODES,
     ArcaConfigurationError,
+    ArcaConnectionError,
     ArcaError,
     ArcaServiceError,
     ArcaTransport,
@@ -181,6 +184,8 @@ def _mark_authorized(invoice, number, cae, cae_due_date, provider_result):
     invoice.provider_result = provider_result
     meta = dict(invoice.meta or {})
     meta.pop('arca_pending_number', None)
+    meta.pop('arca_pending_date', None)
+    meta.pop('arca_retry', None)
     invoice.meta = meta
     invoice.save(update_fields=[
         'voucher_number', 'cae', 'cae_due_date', 'status', 'error_message',
@@ -189,23 +194,30 @@ def _mark_authorized(invoice, number, cae, cae_due_date, provider_result):
     return invoice
 
 
-def _recover_pending(client, invoice):
+def _recover_pending(client, invoice, previous_issue_date=None):
     """Si un intento previo quedo en duda, adopta el CAE si ARCA ya lo emitio."""
     pending = (invoice.meta or {}).get('arca_pending_number')
     if not pending:
         return None
     found = client.get_voucher(invoice.point_of_sale, invoice.voucher_type, int(pending))
+    # El intento en duda pudo ser otro dia: se compara con la fecha que se envio entonces.
+    pending_date = (invoice.meta or {}).get('arca_pending_date')
+    if pending_date:
+        sent_date = date.fromisoformat(pending_date)
+    else:
+        sent_date = previous_issue_date or invoice.issue_date
     if (
         found
         and found.get('cae')
         and found['total'] == invoice.total_amount
-        and found['date'] == invoice.issue_date
+        and found['date'] == sent_date
         and not Invoice.objects.filter(
             point_of_sale=invoice.point_of_sale,
             voucher_type=invoice.voucher_type,
             voucher_number=found['number'],
         ).exclude(pk=invoice.pk).exists()
     ):
+        invoice.issue_date = sent_date
         return _mark_authorized(invoice, found['number'], found['cae'], found['cae_due_date'], {
             'provider': 'wsfe',
             'environment': arca_environment(),
@@ -214,6 +226,7 @@ def _recover_pending(client, invoice):
         })
     meta = dict(invoice.meta or {})
     meta.pop('arca_pending_number', None)
+    meta.pop('arca_pending_date', None)
     invoice.meta = meta
     return None
 
@@ -221,10 +234,38 @@ def _recover_pending(client, invoice):
 def authorize_invoice_wsfe(invoice, client=None):
     """Emite la factura en ARCA. Los errores se guardan en la factura antes de propagarse."""
     client = client or wsfe_client()
-    invoice, failure = _authorize_invoice_wsfe(invoice, client)
+    try:
+        invoice, failure = _authorize_invoice_wsfe(invoice, client)
+    except ArcaError as exc:
+        # Fallo antes de pedir el CAE (ticket, ultimo autorizado, consulta): nada se guardo.
+        _record_failure(invoice.pk, exc)
+        raise
     if failure is not None:
+        _record_failure(invoice.pk, failure)
         raise failure
     return invoice
+
+
+def _record_failure(invoice_pk, exc):
+    """Deja la factura en error y marca si conviene reintentarla sola (ARCA no respondio)."""
+    with db_transaction.atomic():
+        locked = Invoice.objects.select_for_update().get(pk=invoice_pk)
+        if locked.status in (Invoice.Status.AUTHORIZED, Invoice.Status.CANCELLED):
+            return locked
+        meta = dict(locked.meta or {})
+        retryable = isinstance(exc, ArcaConnectionError)
+        if retryable:
+            meta['arca_retry'] = True
+        else:
+            meta.pop('arca_retry', None)
+        locked.meta = meta
+        fields = ['meta', 'updated_at']
+        if locked.status in (Invoice.Status.DRAFT, Invoice.Status.ERROR):
+            locked.status = Invoice.Status.ERROR
+            locked.error_message = str(exc)
+            fields += ['status', 'error_message']
+        locked.save(update_fields=fields)
+        return locked
 
 
 def _authorize_invoice_wsfe(invoice, client):
@@ -241,9 +282,10 @@ def _authorize_invoice_wsfe(invoice, client):
         net, vat = split_vat_included(locked.total_amount, vat_rate)
         locked.net_amount = net
         locked.vat_amount = vat
+        previous_issue_date = locked.issue_date
         locked.issue_date = timezone.localdate()
 
-        recovered = _recover_pending(client, locked)
+        recovered = _recover_pending(client, locked, previous_issue_date)
         if recovered:
             return recovered, None
 
@@ -253,6 +295,7 @@ def _authorize_invoice_wsfe(invoice, client):
             number = client.last_authorized(locked.point_of_sale, locked.voucher_type) + 1
             meta = dict(locked.meta or {})
             meta['arca_pending_number'] = number
+            meta['arca_pending_date'] = locked.issue_date.isoformat()
             meta['vat_rate'] = str(vat_rate)
             locked.meta = meta
             try:
@@ -295,6 +338,7 @@ def _authorize_invoice_wsfe(invoice, client):
 
             meta = dict(locked.meta or {})
             meta.pop('arca_pending_number', None)
+            meta.pop('arca_pending_date', None)
             locked.meta = meta
             locked.status = Invoice.Status.REJECTED
             locked.error_message = '; '.join(result.messages) or 'ARCA rechazo el comprobante'
@@ -319,10 +363,15 @@ def arca_status():
         'servers': None,
         'last_voucher_number': None,
         'error': '',
+        'auto_retry_seconds': int(getattr(settings, 'ARCA_AUTO_RETRY_SECONDS', 0) or 0),
+        'pending_retry': {'count': 0, 'total': 0.0},
     }
     if provider != 'wsfe':
         data['error'] = 'ARCA_PROVIDER no es wsfe: las facturas se simulan y no tienen validez fiscal'
         return data
+    from .arca_retry import pending_retry_summary
+
+    data['pending_retry'] = pending_retry_summary()
     try:
         client = wsfe_client()
         data['servers'] = client.dummy()
